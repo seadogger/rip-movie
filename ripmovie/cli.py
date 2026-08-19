@@ -245,63 +245,100 @@ def cmd_run(args) -> int:
     """Full pipeline for one finished/ripped file: enhance -> name -> deliver -> identify."""
     cfg = _load(args)
     from .identify import search_tmdb
-    from .enhance import enhance, EnhanceError
-    from .naming import target, NamingError
-    from .library import search
-    from .deliver import push
-    from . import jellyfin
+    from .enhance import EnhanceError
+    from .naming import NamingError
+    from .pipeline import deliver_file
 
     inp = args.file
     if not Path(inp).is_file():
         print(f"{BAD} not a file: {inp}")
         return 1
-
-    # 1. resolve movie + genre (drives engine choice + Jellyfin identity)
     key = cfg.get("identify.tmdb_api_key", "")
     m = search_tmdb(args.title, key, args.year) if (key and args.title) else None
     title = (m.title if m else args.title)
     year = (m.year if m else args.year)
-    tmdb_id = (m.tmdb_id if m else None)
     is_anim = args.animation or (bool(m and m.is_animation) if not args.live else False)
     if not title:
         print(f"{BAD} need --title (no TMDb match)")
         return 1
-    print(f"{OK} {title} ({year})  animation={is_anim}  tmdb={tmdb_id or '?'}")
-
-    # 2. enhance -> temp upscaled file (the long part)
-    work = cfg.path_for("paths.work_dir")
-    work.mkdir(parents=True, exist_ok=True)
-    upscaled = work / f"{Path(inp).stem}_upscaled.mp4"
-    print("enhancing (AI upscale — this is the slow stage)...")
+    print(f"{OK} {title} ({year})  animation={is_anim}  tmdb={(m.tmdb_id if m else None) or '?'}")
     try:
-        enhance(cfg, inp, str(upscaled), is_anim,
-                sample_seconds=args.sample, progress=lambda s: print(f"  {s}"))
-    except EnhanceError as e:
-        print(f"{BAD} enhance failed: {e}")
-        return 1
-
-    # 3. name to schema + 4. library collision check
-    try:
-        t = target(cfg, str(upscaled), title, year)
-    except NamingError as e:
+        r = deliver_file(cfg, inp, title, year, (m.tmdb_id if m else None), is_anim,
+                         sample=args.sample, dry_run=args.dry_run,
+                         keep=args.keep_intermediate, progress=print)
+    except (EnhanceError, NamingError) as e:
         print(f"{BAD} {e}")
         return 1
-    print(f"{OK} -> Movies/{t['folder']}/{t['filename']}")
-    present = [f.name for r in search(cfg, title) if r.folder == t["folder"] for f in r.files]
-    if t["filename"] in present:
-        print(f"{WARN} already in library — skipping delivery.")
+    return 0 if r.get("status") in ("delivered", "exists", "dry_run") else 1
+
+
+def cmd_rip(args) -> int:
+    """Rip the disc in the drive to an mkv (scan -> select title -> makemkvcon)."""
+    cfg = _load(args)
+    from .disc import scan_disc, select_titles, DiscError
+    from .rip import rip_title, RipError
+    try:
+        scan = scan_disc(cfg)
+    except DiscError as e:
+        print(f"{BAD} {e}")
+        return 1
+    sel = select_titles(scan, cfg)
+    if args.title is not None:
+        idx = args.title
+    elif sel.ambiguous:
+        print(f"{WARN} ambiguous: {sel.reason}")
+        for t in sel.eligible[:10]:
+            print(f"    #{t.index:<3} {t.hms:>8}  {t.chapters:>3}ch  {t.size_gib:5.1f} GiB")
+        print("  re-run with --title N")
+        return 2
+    else:
+        idx = sel.main_feature.index
+    out = str(cfg.path_for("paths.work_dir") / "rips")
+    print(f"ripping title #{idx} -> {out}")
+    try:
+        path = rip_title(cfg, idx, out, progress=lambda s: print(f"  {s}"))
+    except RipError as e:
+        print(f"{BAD} {e}")
+        return 1
+    print(f"{OK} ripped -> {path}")
+    return 0
+
+
+def cmd_disc(args) -> int:
+    """Process the disc in the drive end-to-end (identify -> rip -> upscale -> deliver)."""
+    cfg = _load(args)
+    from .pipeline import process_disc
+    try:
+        r = process_disc(cfg, force_title=args.title, dry_run=args.dry_run, progress=print)
+    except Exception as e:  # noqa: BLE001
+        print(f"{BAD} {e}")
+        return 1
+    print(f"==> {r.get('status')}")
+    return 0
+
+
+def cmd_watch(args) -> int:
+    cfg = _load(args)
+    from .watch import watch
+    try:
+        return watch(cfg, progress=print)
+    except KeyboardInterrupt:
+        print("\nstopped")
         return 0
 
-    if args.dry_run:
-        print("DRY RUN — enhanced file kept, delivery skipped:", upscaled)
-        return 0
 
-    # 5. deliver + 6. force-identify
-    res = push(cfg, str(upscaled), t["rel"])
-    print(f"{OK} delivered -> {res['dest']}")
-    print(f"    jellyfin: {res.get('jellyfin')}; {jellyfin.force_identify(cfg, t['folder'], tmdb_id)}")
-    if not args.keep_intermediate:
-        os.remove(upscaled)
+def cmd_review(args) -> int:
+    cfg = _load(args)
+    from .pipeline import list_reviews
+    revs = list_reviews(cfg)
+    if not revs:
+        print("review queue empty")
+        return 0
+    for r in revs:
+        print(f"{WARN} {r.get('disc')!r} -> {r.get('match') or '(no match)'}   [{r.get('reason')}]")
+        for c in r.get("candidates", []):
+            print(f"    #{c['index']:<3} {c['hms']:>8}  {c['chapters']:>3}ch  {c['gib']:5.1f} GiB")
+        print("    resolve: put the disc back in and run  rip-movie disc --title N")
     return 0
 
 
@@ -374,11 +411,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="enhance + name, skip delivery")
     sp.add_argument("--keep-intermediate", action="store_true", help="keep the temp upscaled file")
     sp.set_defaults(fn=cmd_run)
-    for name, help_ in [("watch", "daemon: auto-process discs"),
-                        ("review", "resolve ambiguous discs"), ("status", "show jobs")]:
-        sp = sub.add_parser(name, help=help_)
-        sp.add_argument("--dry-run", action="store_true")
-        sp.set_defaults(fn=_not_yet(name))
+    sp = sub.add_parser("rip", help="rip the disc in the drive to an mkv (auto-selects the main title)")
+    sp.add_argument("--title", type=int, help="title index to rip (else auto-selected)")
+    sp.set_defaults(fn=cmd_rip)
+    sp = sub.add_parser("disc", help="process the disc in the drive end-to-end (identify→rip→upscale→deliver)")
+    sp.add_argument("--title", type=int, help="force a title index (resolves an ambiguous disc)")
+    sp.add_argument("--dry-run", action="store_true", help="rip + enhance, skip delivery")
+    sp.set_defaults(fn=cmd_disc)
+    sub.add_parser("watch", help="daemon: wait for discs and process each automatically").set_defaults(fn=cmd_watch)
+    sub.add_parser("review", help="list/resolve ambiguous discs in the review queue").set_defaults(fn=cmd_review)
+    sub.add_parser("status", help="show jobs (TODO)").set_defaults(fn=_not_yet("status"))
     return p
 
 

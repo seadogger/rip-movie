@@ -101,9 +101,16 @@ rip-movie search wall-e                     # do I already own this? (by title, 
 rip-movie identify                          # scan the current disc, print the TMDb match + library status
 rip-movie enhance FILE --title "…"          # AI-upscale a file to 1080p (denoise→engine→detail-transfer)
 rip-movie push FILE --title "…"             # name to schema + deliver to Nextcloud + refresh Jellyfin
-rip-movie run FILE --title "…" [--dry-run]  # the whole thing: enhance → name → deliver → force-identify
-rip-movie watch                             # daemon: wait for discs and process each automatically (TODO)
+rip-movie run FILE --title "…" [--dry-run]  # a finished file: enhance → name → deliver → force-identify
+rip-movie rip [--title N]                    # rip the disc in the drive to an mkv (auto-selects main title)
+rip-movie disc [--title N] [--dry-run]       # a disc, end-to-end: identify → rip → upscale → deliver
+rip-movie watch                              # daemon: wait for discs and process each automatically
+rip-movie review                             # list/resolve ambiguous discs (playlist obfuscation / episodic)
 ```
+
+Two entry points: **`run FILE`** starts from an already-ripped file; **`disc` / `watch`** start from a
+physical disc (scan → TMDb identify → skip if already owned → MakeMKV rip → the same `run` back half).
+Ambiguous discs go to the review queue instead of guessing the wrong title.
 
 The AI upscale is a single ANE-streaming pass (~8–11 h/movie, overnight). `run FILE --title "WALL·E"`
 upscales a ripped DVD and lands it in Jellyfin as `WALL·E (2008) - 1080p AVC.mp4`, pinned to the
@@ -121,11 +128,13 @@ Nextcloud/Jellyfin access). See that file for every knob.
 
 ## Status
 
-Early scaffold. Implemented + tested: config, `config-check`, `search` (title → library, with
-quality/direct-play flags + TMDb enrichment), robust TMDb matcher (spelling variants + similarity
-scoring — handles WALL·E), disc scan + title-selection heuristic, disc `identify`, shared library
-check, **`push`** (probe → schema-name → stream into Nextcloud via kubectl → `occ files:scan`
-→ Jellyfin refresh) — validated end-to-end at ~750 MB, and **`enhance`** (deinterlace → denoise →
-Real-ESRGAN by genre → aspect-correct 1080p → chunked → audio-muxed; animation=animevideov3,
-live-action=Remacri). In progress: rip (MakeMKV), encode (final HEVC master + direct-play),
-full pipeline orchestration, watch daemon, review queue.
+**Full pipeline built, disc-to-Jellyfin.** Implemented + tested: config/`config-check`; `search`
+(title → library, quality flags, TMDb enrichment) with a robust TMDb matcher (spelling variants +
+similarity — handles WALL·E); disc scan + title-selection heuristic + `identify`; **`enhance`** —
+cadence classifier (idet + inverse-telecine) → light denoise → CoreML/ANE upscale (animevideov3 /
+general-x4v3) → detail-transfer → aspect-correct 1080p, **streaming** (no PNG round-trip), ~8–11 h/movie;
+**`push`**/`deliver` (schema-name → Nextcloud via kubectl → `occ files:scan` → Jellyfin refresh +
+TMDb force-identify); **`rip`** (MakeMKV); **`run`** (file→library) and **`disc`**/**`watch`**
+(disc→library) orchestration + review queue.
+
+Remaining polish: `status`, optional HEVC master encode, hard-telecine tuning.
