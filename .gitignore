@@ -1,0 +1,24 @@
+# Secrets (real API keys / passwords) — config uses ${ENV} placeholders instead
+config/secrets.env
+
+# Runtime dirs
+work/
+logs/
+state/
+
+# Large, re-downloadable tool artifacts (see tools/README.md to rebuild)
+tools/torchenv/
+tools/realesrgan/
+tools/realesrgan-full/
+tools/waifu2x/
+tools/torch_models/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store

@@ -1,0 +1,108 @@
+# rip-movie configuration. Copy to rip-movie.toml and fill in secrets.
+# Any string of the form ${ENV_VAR} is expanded from the environment at load time.
+# Any path starting with ~ is expanded to your home directory.
+
+[paths]
+work_dir   = "~/rip-movie/work"      # scratch for rips + encodes (needs 2-3x disc size free)
+log_dir    = "~/rip-movie/logs"
+state_dir  = "~/rip-movie/state"     # job state + review queue (JSON)
+makemkvcon = "/opt/homebrew/bin/makemkvcon"
+handbrakecli = "HandBrakeCLI"
+ffmpeg     = "/opt/homebrew/bin/ffmpeg"
+rclone     = "rclone"
+realesrgan        = "~/Desktop/Development/rip-movie/tools/realesrgan/realesrgan-ncnn-vulkan-v0.2.0-macos/realesrgan-ncnn-vulkan"
+realesrgan_models = "~/Desktop/Development/rip-movie/tools/realesrgan/realesrgan-ncnn-vulkan-v0.2.0-macos/models"
+# PyTorch/MPS path for compact .pth models (e.g. realesr-general-x4v3 for live-action)
+torch_python  = "~/Desktop/Development/rip-movie/tools/torchenv/bin/python"
+upscale_torch = "~/Desktop/Development/rip-movie/tools/upscale_torch.py"
+coreml_infer  = "~/Desktop/Development/rip-movie/tools/coreml_infer.py"   # CoreML/ANE runner (~6x faster)
+enhance_stream = "~/Desktop/Development/rip-movie/tools/enhance_stream.py" # streaming (no PNG round-trip)
+torch_models  = "~/Desktop/Development/rip-movie/tools/torch_models"
+
+[disc]
+device            = "disc:0"         # makemkv disc index; disc:0 = first optical drive
+min_title_seconds = 300             # ignore titles shorter than this (trailers, menus)
+ambiguous_ratio   = 0.90            # 2nd-longest >= ratio*longest => ambiguous -> review queue
+eject_when_done   = true
+
+[identify]
+tmdb_api_key      = "${TMDB_API_KEY}"   # https://www.themoviedb.org/settings/api  (v3 key)
+strip_label_tokens = ["DVD", "BLURAY", "BLU_RAY", "DISC", "SEASON", "BONUS", "4K", "UHD"]
+
+[library]
+movies_subpath = "Videos/Movies"    # relative to the HomeMedia user's files root
+
+[encode]
+keep_archival_master = true         # keep the lossless disc remux (.mkv) as the "rip once" keeper
+master_container     = "mkv"
+
+[encode.directplay]
+# Rendition made only when the master codec is not Apple-native (MPEG-2, VC-1), or on upscale.
+codec          = "hevc"             # hevc | h264   (all-Apple clients => hevc)
+container      = "mp4"
+quality_rf     = 20                 # HandBrake constant-quality RF (lower = higher quality/bigger)
+encoder_preset = "slow"            # x265 preset
+max_height     = 1080               # cap direct-play height; masters keep native res
+
+[encode.audio]
+ensure_aac_stereo     = true        # always add an AAC 2.0 track (universal Apple fallback)
+ensure_dolby_surround = true        # ensure an AC3/E-AC3 5.1 exists (transcode DTS-only sources)
+keep_all_master_tracks = true       # master keeps every disc audio track untouched
+
+# ---- Upscaling (per source type) --------------------------------------------
+# engine: topaz-tvai | topaz-veai-handoff | realesrgan | anime4k | nnedi | none | auto
+[upscale.dvd]
+enabled        = true
+target_height  = 1080               # "1080p minimum" rule; AI output is downscaled to this
+engine         = "auto"             # auto = pick model by TMDb genre (below); or pin a model name
+scale          = 3                  # realesrgan scale for animevideov3 (4x-only models ignore this)
+deinterlace    = "auto"             # auto (detect) | yes | no
+ivtc           = "auto"             # inverse-telecine: auto|on|off. 29.97 NTSC film DVDs carry ~20%
+                                    # duplicate frames (3:2 pulldown); decimate to 23.976 = faster + native cadence
+denoise         = "hqdn3d=2:1:2:2"  # LIGHT pre-clean only — keep texture; heavy denoise + the AI model
+                                    # both flatten weave/grain/pavement. Detail-transfer restores what's lost.
+detail_transfer = 0.8               # 0=off. Blend high-freq luma texture from the source back onto the AI
+                                    # result (grain-extract/merge). Fixes the "smooth tweed/plastic" over-smoothing.
+chunk_seconds  = 30                 # process the movie in chunks so frame PNGs don't fill the disk
+
+[upscale.dvd.engines]               # validated 2026-08-17 via WALL·E + Charlie Wilson A/B
+animation   = "realesr-animevideov3"   # ncnn, fast (~11h/movie), crisp on cartoons
+live_action = "realesr-general-x4v3"   # PyTorch/MPS (.pth), natural+sharp on faces (~46h/movie).
+# Heavy ncnn 4x models (remacri-4x/ultrasharp-4x/realesrgan-x4plus) look great on stills but are
+# impractically slow for video (>4s/frame = weeks/movie). animevideov3 on live-action = waxy faces.
+
+[upscale.dvd.topaz_tvai]
+model = "prob-3"                    # Proteus
+app   = "/Applications/Topaz Video AI.app"   # set once installed
+
+[upscale.bluray_1080p]
+enabled = false                     # 1080p stays 1080p
+
+[upscale.uhd_2160p]
+enabled = false                     # 4k stays 4k
+
+# ---- Delivery (services are ClusterIP-only; we go through kubectl) -----------
+[deliver]
+method = "kubectl"                  # kubectl | webdav
+
+[deliver.kubectl]
+context               = "default"
+nextcloud_namespace   = "nextcloud"
+nextcloud_pod_selector = "app.kubernetes.io/name=nextcloud"
+nextcloud_container   = "nextcloud"
+data_path             = "/var/www/html/data/HomeMedia/files"  # HomeMedia user's files dir in-pod
+web_user              = "www-data"
+occ                   = "php /var/www/html/occ"
+
+[deliver.webdav]                    # only used if method = "webdav"
+base_url  = ""                      # e.g. https://cloud.example.com/remote.php/dav/files/HomeMedia
+user      = "HomeMedia"
+password  = "${NEXTCLOUD_PASS}"
+
+[jellyfin]
+method           = "kubectl"        # kubectl exec curl to localhost inside the pod
+namespace        = "jellyfin"
+pod_selector     = "app.kubernetes.io/name=jellyfin"
+service_cluster_ip = "10.43.223.16"
+port             = 8096
+api_key          = "${JELLYFIN_API_KEY}"   # Jellyfin dashboard -> API Keys (empty = rely on scheduled scan)
