@@ -111,86 +111,128 @@ def gather(cfg: Config) -> dict:
 
 
 PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>rip-movie</title><style>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>rip·movie — pipeline</title>
+<style>
+:root{
+ --ground:#0c0f14;--panel:#12171f;--panel2:#171d27;--line:#242c38;
+ --tx:#e7edf4;--dim:#8593a3;--faint:#5a6675;--accent:#4aa8ff;--accent-deep:#2b6fd6;
+ --good:#43c463;--warn:#e0a020;--bad:#f2564d;
+ --stripe-rip:var(--accent);--stripe-queue:var(--warn);--stripe-up:#9d7bff;
+ --stripe-done:var(--good);--stripe-fail:var(--bad);
+ --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+ --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Helvetica,Arial,sans-serif;
+ --shadow:0 1px 0 rgba(255,255,255,.02),0 6px 20px -12px rgba(0,0,0,.6)}
+@media (prefers-color-scheme:light){:root{
+ --ground:#eef1f5;--panel:#fff;--panel2:#f6f8fb;--line:#dde3ec;--tx:#141b24;--dim:#5a6773;
+ --faint:#8b97a4;--accent:#1f6feb;--accent-deep:#1a5fc4;
+ --shadow:0 1px 2px rgba(20,30,45,.06),0 8px 24px -16px rgba(20,30,45,.25)}}
+:root[data-theme=dark]{--ground:#0c0f14;--panel:#12171f;--panel2:#171d27;--line:#242c38;--tx:#e7edf4;
+ --dim:#8593a3;--faint:#5a6675;--accent:#4aa8ff;--accent-deep:#2b6fd6}
+:root[data-theme=light]{--ground:#eef1f5;--panel:#fff;--panel2:#f6f8fb;--line:#dde3ec;--tx:#141b24;
+ --dim:#5a6773;--faint:#8b97a4;--accent:#1f6feb;--accent-deep:#1a5fc4}
 *{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#0d1117;--card:#161b22;--card2:#1c2330;--bd:#2a3038;--tx:#e6edf3;--dim:#8b949e;
---ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff;--accd:#1f6feb}
-body{background:var(--bg);color:var(--tx);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;padding:20px}
-header{display:flex;align-items:center;gap:14px;margin-bottom:18px}
-h1{font-size:20px;font-weight:650;letter-spacing:.2px}
-h1 .m{color:var(--acc)}
-.pulse{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(63,185,80,.6);animation:p 2s infinite}
-@keyframes p{0%{box-shadow:0 0 0 0 rgba(63,185,80,.5)}70%{box-shadow:0 0 0 8px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
-.sub{color:var(--dim);font-size:12px;margin-left:auto}
-.board{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px}
-.col{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;min-height:120px}
-.col h2{font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim);margin-bottom:11px;display:flex;gap:7px;align-items:center}
-.col h2 .n{margin-left:auto;background:var(--card2);color:var(--tx);border-radius:20px;padding:1px 8px;font-size:11px}
-.card{background:var(--card2);border:1px solid var(--bd);border-radius:9px;padding:10px 11px;margin-bottom:9px}
+body{background:var(--ground);color:var(--tx);font-family:var(--sans);font-size:14px;line-height:1.45;
+ padding:24px 22px 40px;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto}
+header{display:flex;align-items:baseline;gap:14px;margin-bottom:4px}
+.brand{font-size:20px;font-weight:680;letter-spacing:-.2px;display:flex;align-items:center;gap:9px}
+.brand .disc{width:18px;height:18px;border-radius:50%;box-shadow:inset 0 0 0 1px var(--line);
+ background:radial-gradient(circle at 50% 50%,var(--ground) 0 22%,var(--accent) 24% 30%,var(--ground) 32% 38%,var(--accent-deep) 40%);
+ animation:spin 6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.brand b{color:var(--accent)}.brand .sub{color:var(--dim);font-weight:400;letter-spacing:0}
+.live{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--dim);font-family:var(--mono);font-size:12px}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 0 0 rgba(67,196,99,.55);animation:pl 2.2s infinite}
+@keyframes pl{0%{box-shadow:0 0 0 0 rgba(67,196,99,.5)}70%{box-shadow:0 0 0 7px rgba(67,196,99,0)}100%{box-shadow:0 0 0 0 rgba(67,196,99,0)}}
+.flow{color:var(--faint);font-family:var(--mono);font-size:11.5px;letter-spacing:.3px;margin:14px 0 18px;
+ display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.flow b{color:var(--dim);font-weight:600}.flow .arw{color:var(--accent);opacity:.6}
+.board{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;align-items:start}
+.col{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 12px;box-shadow:var(--shadow)}
+.col>h2{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);font-weight:700;
+ display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.col>h2 .ic{font-size:13px}
+.col>h2 .n{margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:600;color:var(--tx);
+ background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:1px 9px;min-width:24px;text-align:center}
+.card{position:relative;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+ padding:11px 12px 11px 15px;margin-bottom:9px;overflow:hidden}
 .card:last-child{margin-bottom:0}
-.card .t{font-weight:600;font-size:13.5px}
-.card .meta{color:var(--dim);font-size:11.5px;margin-top:3px}
-.stage{display:inline-block;background:var(--accd);color:#fff;font-size:10.5px;font-weight:600;border-radius:5px;padding:1px 7px;margin-top:7px;text-transform:uppercase;letter-spacing:.4px}
-.bar{height:6px;background:#0d1117;border-radius:4px;margin-top:8px;overflow:hidden}
-.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accd),var(--acc));border-radius:4px;transition:width .6s}
-.bar.ind>i{width:35%;animation:slide 1.4s ease-in-out infinite;background:linear-gradient(90deg,transparent,var(--acc),transparent)}
-@keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
-.empty{color:#5b6470;font-size:12px;font-style:italic;padding:6px 2px}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
-.g{background:var(--ok)}.r{background:var(--bad)}.y{background:var(--warn)}
-.health .row{display:flex;align-items:center;padding:5px 0;font-size:13px;border-bottom:1px solid var(--bd)}
-.health .row:last-child{border:0}.health .row b{margin-left:auto;font-weight:600}
-.done .card{padding:7px 10px}.done .t{font-weight:500;font-size:12.5px}
-.fail{border-color:#5c2b2b;background:#20161a}
-</style></head><body>
-<header><span class=pulse></span><h1>rip<span class=m>·</span>movie <span style=color:var(--dim);font-weight:400>pipeline</span></h1>
-<span class=sub id=sub>connecting…</span></header>
+.card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--st,var(--line))}
+.card.rip{--st:var(--stripe-rip)}.card.queue{--st:var(--stripe-queue)}.card.up{--st:var(--stripe-up)}
+.card.done{--st:var(--stripe-done)}.card.fail{--st:var(--stripe-fail)}
+.card .t{font-weight:620;font-size:13.5px;letter-spacing:-.1px}.card .t .yr{color:var(--dim);font-weight:400}
+.card .meta{color:var(--dim);font-family:var(--mono);font-size:11.5px;margin-top:4px;font-variant-numeric:tabular-nums}
+.pill{display:inline-flex;align-items:center;font-size:10px;font-weight:700;letter-spacing:.5px;
+ text-transform:uppercase;border-radius:5px;padding:2px 7px;margin-top:8px}
+.pill.b{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
+.pill.p{background:color-mix(in srgb,var(--stripe-up) 20%,transparent);color:var(--stripe-up)}
+.pill.g{background:color-mix(in srgb,var(--good) 18%,transparent);color:var(--good)}
+.bar{height:5px;background:var(--ground);border-radius:4px;margin-top:9px;overflow:hidden;position:relative}
+.bar>i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent-deep),var(--accent));transition:width .6s}
+.bar.ind::after{content:"";position:absolute;inset:0;width:38%;border-radius:4px;
+ background:linear-gradient(90deg,transparent,var(--stripe-up),transparent);animation:sl 1.5s ease-in-out infinite}
+@keyframes sl{0%{transform:translateX(-100%)}100%{transform:translateX(280%)}}
+.empty{color:var(--faint);font-size:12px;font-style:italic;padding:8px 3px}
+.health .row{display:flex;align-items:center;gap:9px;padding:7px 2px;font-size:13px;border-bottom:1px solid var(--line)}
+.health .row:last-child{border:0}
+.health .row b{margin-left:auto;font-family:var(--mono);font-weight:600;font-variant-numeric:tabular-nums}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.dot.g{background:var(--good);box-shadow:0 0 6px color-mix(in srgb,var(--good) 60%,transparent)}.dot.r{background:var(--bad)}
+footer{margin-top:22px;color:var(--faint);font-family:var(--mono);font-size:11px;display:flex;gap:8px;flex-wrap:wrap}
+footer .k{color:var(--dim)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style></head><body><div class=wrap>
+<header><div class=brand><span class=disc></span>rip<b>·</b>movie <span class=sub>pipeline</span></div>
+<div class=live><span class=pulse></span><span id=ts>connecting…</span></div></header>
+<div class=flow><b>disc</b><span class=arw>→</span>rip<span class=arw>→</span>master to Jellyfin
+<span class=arw>→</span>queue<span class=arw>→</span>upscale (ANE)<span class=arw>→</span>crop · mux · OCR
+<span class=arw>→</span>deliver<span class=arw>→</span>cleanup</div>
 <div class=board id=board></div>
+<footer><span class=k>source</span> DVD/Blu-ray · MakeMKV<span class=k>· upscale</span> Real-ESRGAN on CoreML/ANE
+<span class=k>· deliver</span> Nextcloud → Jellyfin</footer></div>
 <script>
 const E=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e};
 const human=n=>{n=+n||0;const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<4){n/=1024;i++}return n.toFixed(1)+" "+u[i]};
-const dur=s=>{s=+s||0;const h=s/3600|0,m=(s%3600)/60|0;return h?`${h}h ${m}m`:`${m}m ${s%60|0}s`};
-function col(icon,title,n){const c=E("div","col");c.append(E("h2",null,`<span>${icon}</span><span>${title}</span>`+(n!=null?`<span class=n>${n}</span>`:"")));return c}
-function card(html,cls){return E("div","card"+(cls?" "+cls:""),html)}
-function bar(pct){return `<div class="bar${pct==null?" ind":""}"><i style="width:${pct==null?35:pct}%"></i></div>`}
-async function tick(){
- let s;try{s=await(await fetch("api/state")).json()}catch(e){document.getElementById("sub").textContent="offline — retrying";return}
- document.getElementById("sub").textContent="updated "+new Date().toLocaleTimeString();
+const dur=s=>{s=+s||0;const h=s/3600|0,m=(s%3600)/60|0;return h?`${h}h ${m}m`:`${m}m ${(s%60|0)}s`};
+const yr=y=>y?` <span class=yr>(${y})</span>`:"";
+function col(icon,title,n){const c=E("div","col");
+ c.append(E("h2",null,`<span class=ic>${icon}</span><span>${title}</span>`+(n!=null?`<span class=n>${n}</span>`:"")));return c}
+function card(cls,html){return E("div","card"+(cls?" "+cls:""),html)}
+function bar(pct){return `<div class="bar${pct==null?" ind":""}">${pct==null?"":`<i style="width:${pct}%"></i>`}</div>`}
+function render(s){
  const b=document.getElementById("board");b.innerHTML="";
- // Disc + Rip
- const c1=col("💿","Disc / Rip");
- if(s.ripping){const r=s.ripping;c1.append(card(`<div class=t>${r.title||r.disc||"ripping"}${r.year?" ("+r.year+")":""}</div>
-  <div class=meta>disc ${r.disc||"?"} · ${human(r.size)}${r.pct!=null?" · "+r.pct+"%":""} · ${dur(r.elapsed)}</div>
-  <div class=stage>${r.active?"ripping":"finishing"}</div>${bar(r.pct)}`));}
- else if(s.drive&&s.drive.present)c1.append(card(`<div class=t>disc inserted</div><div class=meta>idle — not yet processing</div>`));
+ const c1=col("💿","Disc &amp; Rip");
+ if(s.ripping){const r=s.ripping;c1.append(card("rip",`<div class=t>${r.title||r.disc||"ripping"}${yr(r.year)}</div>
+  <div class=meta>${r.disc||"?"} · ${human(r.size)}${r.pct!=null?" · "+r.pct+"%":""} · ${dur(r.elapsed)}</div>
+  <span class="pill b">${r.active?"ripping":"finishing"}</span>${bar(r.pct)}`));}
+ else if(s.drive&&s.drive.present)c1.append(card("",`<div class=t>Disc inserted</div><div class=meta>idle — not processing</div>`));
  else c1.append(E("div","empty","drive empty"));
  b.append(c1);
- // Upscale queue
  const c2=col("🎞️","Upscale Queue",s.queue.length);
- if(s.queue.length)s.queue.forEach((j,i)=>c2.append(card(`<div class=t>${j.title}${j.year?" ("+j.year+")":""}</div><div class=meta>#${i+1} in line</div>`)));
+ if(s.queue.length)s.queue.forEach((j,i)=>c2.append(card("queue",`<div class=t>${j.title}${yr(j.year)}</div><div class=meta>#${i+1} in line · waiting for ANE</div>`)));
  else c2.append(E("div","empty","no jobs waiting"));
- s.failed.forEach(f=>c2.append(card(`<div class=t>⚠ ${f}</div><div class=meta>failed — needs a look</div>`,"fail")));
+ (s.failed||[]).forEach(f=>c2.append(card("fail",`<div class=t>${f}</div><div class=meta>failed — needs a look</div>`)));
  b.append(c2);
- // Upscaling now
- const c3=col("⚡","Upscaling (ANE)");
- if(s.upscaling){const u=s.upscaling;c3.append(card(`<div class=t>${u.title}${u.year?" ("+u.year+")":""}</div>
+ const c3=col("⚡","Upscaling · ANE");
+ if(s.upscaling){const u=s.upscaling;c3.append(card("up",`<div class=t>${u.title}${yr(u.year)}</div>
   <div class=meta>${human(u.size)} · ${dur(u.elapsed)}${u.active?"":" · idle"}</div>
-  <div class=stage>${u.stage||"working"}</div>${bar(null)}`));}
+  <span class="pill p">${u.stage||"working"}</span>${bar(null)}`));}
  else c3.append(E("div","empty","ANE idle"));
  b.append(c3);
- // Done
  const c4=col("✅","Recently Done",s.done.length||null);
- const c4b=E("div","done");
- if(s.done.length)s.done.forEach(d=>c4b.append(card(`<div class=t>${d.title}${d.year?" ("+d.year+")":""}</div>`)));
- else c4b.append(E("div","empty","nothing yet"));
- c4.append(c4b);b.append(c4);
- // Cluster
- const cl=s.cluster||{},c5=col("☁️","Library / Cluster");
+ if(s.done.length)s.done.forEach(d=>c4.append(card("done",`<div class=t>${d.title}${yr(d.year)}</div>`)));
+ else c4.append(E("div","empty","nothing finished yet"));
+ b.append(c4);
+ const cl=s.cluster||{},c5=col("☁️","Library &amp; Cluster");
  const h=E("div","health");
- const row=(l,ok,extra)=>`<div class=row><span class="dot ${ok?'g':'r'}"></span>${l}<b>${extra!=null?extra:(ok?"up":"down")}</b></div>`;
- h.innerHTML=row("Nextcloud",cl.nextcloud)+row("Jellyfin",cl.jellyfin)+row("Movies",cl.library!=null,cl.library!=null?cl.library:"?");
+ const row=(l,ok,extra)=>`<div class=row><span class="dot ${ok?'g':'r'}"></span>${l}<b>${extra!=null?extra:(ok?"online":"down")}</b></div>`;
+ h.innerHTML=row("Nextcloud",cl.nextcloud)+row("Jellyfin",cl.jellyfin)+row("Movies indexed",cl.library!=null,cl.library!=null?cl.library:"?");
  c5.append(h);b.append(c5);
+}
+async function tick(){
+ let s;try{s=await(await fetch("api/state")).json()}catch(e){document.getElementById("ts").textContent="offline — retrying";return}
+ document.getElementById("ts").textContent="live · "+new Date().toLocaleTimeString();
+ render(s);
 }
 tick();setInterval(tick,2500);
 </script></body></html>"""
@@ -204,8 +246,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/api/state"):
-            body = json.dumps(gather(self.cfg)).encode()
-            self._send(200, "application/json", body)
+            self._send(200, "application/json", json.dumps(gather(self.cfg)).encode())
         elif self.path in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", PAGE.encode())
         else:
@@ -222,8 +263,7 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
 
-def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787,
-          progress=print) -> int:
+def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787, progress=print) -> int:
     _Handler.cfg = cfg
     httpd = ThreadingHTTPServer((host, port), _Handler)
     progress(f"dashboard -> http://{host}:{port}  (Ctrl-C to stop)")
