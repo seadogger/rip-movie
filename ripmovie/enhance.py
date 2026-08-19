@@ -53,12 +53,16 @@ def _probe(cfg: Config, path: str) -> dict:
         raise EnhanceError(f"ffprobe failed: {out.stderr.strip()}")
     d = json.loads(out.stdout)
     v = d["streams"][0]
+    sar = v.get("sample_aspect_ratio", "1:1")
+    sn, sd = (sar.split(":") + ["1"])[:2] if ":" in sar else ("1", "1")
+    sar_f = (int(sn) / int(sd)) if sd and int(sd) else 1.0
     return {
         "fps": v.get("r_frame_rate", "24000/1001"),
         "field_order": v.get("field_order", "progressive"),
         "width": int(v.get("width", 0) or 0),
         "height": int(v.get("height", 0) or 0),
         "dar": _dar(v),
+        "sar": sar_f or 1.0,
         "duration": float(d.get("format", {}).get("duration", 0) or 0),
     }
 
@@ -141,6 +145,45 @@ def detect_cadence(cfg: Config, path: str, src_fps: float) -> tuple[str, str, st
     return "progressive", "", None                                     # clean, passthrough
 
 
+def detect_crop(cfg: Config, path: str, w: int, h: int) -> Optional[tuple[int, int, int, int]]:
+    """Find the active picture inside baked-in black bars (letterbox/pillarbox/windowbox).
+
+    Samples cropdetect across several timestamps (dodging fades/dark scenes) and takes the most
+    common rectangle. Returns (cw, ch, cx, cy) in storage pixels, or None if <5% would be removed
+    (i.e. effectively full-frame) so clean transfers are never cropped.
+    """
+    ff = cfg.get("paths.ffmpeg", "ffmpeg")
+    counts: dict[tuple[int, int, int, int], int] = {}
+    for ss in (120, 600, 1500, 3000, 5000):
+        try:
+            out = subprocess.run(
+                [ff, "-hide_banner", "-ss", str(ss), "-i", path, "-vf", "cropdetect=24:2:0",
+                 "-frames:v", "200", "-an", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=180).stderr
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        for m in re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", out):
+            key = tuple(int(x) for x in m)
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return None
+    cw, ch, cx, cy = max(counts.items(), key=lambda kv: kv[1])[0]
+    if cw <= 0 or ch <= 0 or cw > w or ch > h:
+        return None
+    if 1 - (cw * ch) / (w * h) < 0.05:               # <5% removed -> not worth cropping
+        return None
+    return (cw, ch, cx, cy)
+
+
+def _fit_dims(disp_ar: float, max_w: int, max_h: int) -> tuple[int, int]:
+    """Largest even w x h that fits within (max_w, max_h) at the given display aspect ratio."""
+    if disp_ar >= max_w / max_h:                      # wider than the frame -> bound by width
+        ow, oh = max_w, round(max_w / disp_ar)
+    else:                                             # taller -> bound by height
+        ow, oh = round(max_h * disp_ar), max_h
+    return ow - (ow % 2), oh - (oh % 2)
+
+
 def choose_model(cfg: Config, is_animation: bool, pinned: Optional[str] = None) -> str:
     if pinned and pinned != "auto":
         return pinned
@@ -187,6 +230,22 @@ def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
     info = _probe(cfg, input_path)
     fps = info["fps"]
     out_w = _target_width(info["dar"], target_h)   # honor anamorphic DAR (e.g. 16:9 DVD)
+    out_h = target_h
+
+    # Auto-crop baked-in black bars (4:3 letterbox / windowbox DVDs) so we upscale the REAL picture,
+    # not the bars, and deliver a frame that fills the TV. The model input is fixed-size, so we crop
+    # then scale the active picture back to the source WxH for the SR; the true aspect is restored in
+    # the final resize (out_w x out_h).
+    crop_vf = ""
+    autocrop = str(cfg.get("upscale.dvd.autocrop", "auto")).lower()
+    crop = detect_crop(cfg, input_path, info["width"], info["height"]) if autocrop != "off" else None
+    if crop:
+        cw, ch, cx, cy = crop
+        crop_vf = f"crop={cw}:{ch}:{cx}:{cy},"
+        max_w = int(cfg.get("upscale.dvd.max_width", 1920))
+        disp_ar = (cw * info["sar"]) / ch            # true display aspect of the cropped picture
+        out_w, out_h = _fit_dims(disp_ar, max_w, target_h)
+
     detail_strength = float(cfg.get("upscale.dvd.detail_transfer", 0.0) or 0.0)
     if sample_seconds:
         offset = float(sample_start or 0)
@@ -208,22 +267,24 @@ def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
             cad_fps = "24000/1001"
     if cad_fps:
         fps = cad_fps
-    vf_pre = cad_vf + denoise
+    vf_pre = cad_vf + crop_vf + denoise
+    if crop_vf:                                    # crop changed the size -> scale back to model input
+        vf_pre += f",scale={info['width']}:{info['height']}"
 
     # CoreML path: stream the whole segment through pipes (no PNG round-trip, no chunking).
     if use_coreml and cfg.get("paths.enhance_stream"):
         stream = cfg.path_for("paths.enhance_stream")
         argv = [str(py), str(stream), "--input", input_path, "--output", str(output_path),
                 "--model", str(model_file), "--vf", vf_pre, "--out-w", str(out_w),
-                "--target-h", str(target_h), "--fps", fps, "--detail", str(detail_strength),
+                "--target-h", str(out_h), "--fps", fps, "--detail", str(detail_strength),
                 "--ffmpeg", ff, "--ffprobe", _ffprobe_bin(cfg)]
         if sample_seconds:
             argv += ["--ss", str(offset), "--t", str(total)]
         if not mux_audio:
             argv.append("--no-audio")
-        progress(f"streaming CoreML/ANE  engine={model} target={out_w}x{target_h} "
-                 f"detail={detail_strength} cadence={kind} fps={fps} "
-                 f"range={offset:.0f}..{offset + total:.0f}s")
+        progress(f"streaming CoreML/ANE  engine={model} out={out_w}x{out_h} "
+                 f"detail={detail_strength} cadence={kind} crop={'yes' if crop_vf else 'no'} "
+                 f"fps={fps} range={offset:.0f}..{offset + total:.0f}s")
         _run(argv)
         return {"output": str(output_path), "model": model, "scale": scale,
                 "target_height": target_h, "chunks": 0, "mode": "stream"}
@@ -264,8 +325,8 @@ def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
                 # pavement) onto the AI frames, which otherwise smooth it away. Both are scaled to
                 # the target, the source's high-pass is grain-extracted and merged, luma-only.
                 graph = (
-                    f"[0:v]scale={out_w}:{target_h}:flags=lanczos,format=yuv444p[base];"
-                    f"[1:v]scale={out_w}:{target_h}:flags=lanczos,format=yuv444p,split[s1][s2];"
+                    f"[0:v]scale={out_w}:{out_h}:flags=lanczos,format=yuv444p[base];"
+                    f"[1:v]scale={out_w}:{out_h}:flags=lanczos,format=yuv444p,split[s1][s2];"
                     f"[s2]gblur=sigma=2[sb];"
                     f"[s1][sb]blend=all_mode=grainextract[g];"
                     f"[g]lutyuv=y='128+(val-128)*{detail_strength}':u=128:v=128[gs];"
@@ -278,7 +339,7 @@ def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
                       "-pix_fmt", "yuv420p", str(chunk_mp4)])
             else:
                 _run([ff, "-y", "-framerate", fps, "-i", f"{fout}/%08d.png",
-                      "-vf", f"scale={out_w}:{target_h}:flags=lanczos,setsar=1",
+                      "-vf", f"scale={out_w}:{out_h}:flags=lanczos,setsar=1",
                       "-c:v", "libx264", "-crf", "16", "-preset", "medium",
                       "-pix_fmt", "yuv420p", str(chunk_mp4)])
             chunk_files.append(chunk_mp4)

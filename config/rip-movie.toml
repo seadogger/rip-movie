@@ -62,6 +62,9 @@ languages = ["eng"]                 # keep only these subtitle languages (drop t
 [upscale.dvd]
 enabled        = true
 target_height  = 1080               # "1080p minimum" rule; AI output is downscaled to this
+max_width      = 1920               # cap rendition width; scope (2.35) content becomes ~1920x818
+autocrop       = "auto"             # auto|off. Detect + strip baked-in black bars (4:3 letterbox /
+                                    # windowbox DVDs) so we upscale the REAL picture and it fills the TV
 engine         = "auto"             # auto = pick model by TMDb genre (below); or pin a model name
 scale          = 3                  # realesrgan scale for animevideov3 (4x-only models ignore this)
 deinterlace    = "auto"             # auto (detect) | yes | no
