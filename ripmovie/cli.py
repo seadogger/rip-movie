@@ -377,9 +377,47 @@ def cmd_status(args) -> int:
     for j in jobs:
         print(f"  {j}")
 
+    from .pipeline import list_upscale_jobs, _upscale_dir
+    jobs = list_upscale_jobs(cfg)
+    failed = len(list(_upscale_dir(cfg).glob("*.failed")))
+    print(f"Upscale queue : {len(jobs)} pending" + (f", {failed} failed" if failed else "")
+          + (" (run `rip-movie upscale-worker`)" if jobs else ""))
+    for j in jobs[:8]:
+        print(f"  - {j['title']} ({j.get('year')})")
+
     revs = list_reviews(cfg)
     print(f"Review queue  : {len(revs)} disc(s) awaiting a manual title pick"
           + (" (run `rip-movie review`)" if revs else ""))
+    return 0
+
+
+def cmd_upscale_worker(args) -> int:
+    """Drain the upscale queue: build + deliver each 1080p rendition serially, one at a time."""
+    cfg = _load(args)
+    from .pipeline import run_upscale_worker
+    try:
+        return run_upscale_worker(cfg, once=args.once, progress=print)
+    except KeyboardInterrupt:
+        print("\nstopped")
+        return 0
+
+
+def cmd_queue(args) -> int:
+    """List pending / failed upscale jobs."""
+    cfg = _load(args)
+    from .pipeline import list_upscale_jobs, _upscale_dir
+    jobs = list_upscale_jobs(cfg)
+    failed = sorted(_upscale_dir(cfg).glob("*.failed"))
+    running = sorted(_upscale_dir(cfg).glob("*.running"))
+    if not jobs and not failed and not running:
+        print("upscale queue empty")
+        return 0
+    for r in running:
+        print(f"{WARN} running: {r.stem}")
+    for j in jobs:
+        print(f"  pending: {j['title']} ({j.get('year')})  <- {Path(j['source']).name}")
+    for f in failed:
+        print(f"{BAD} failed: {f.stem}  (fix + `mv {f.name} {f.stem}.json` to requeue)")
     return 0
 
 
@@ -487,6 +525,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="rip + enhance, skip delivery")
     sp.set_defaults(fn=cmd_disc)
     sub.add_parser("watch", help="daemon: wait for discs and process each automatically").set_defaults(fn=cmd_watch)
+    sp = sub.add_parser("upscale-worker", help="drain the upscale queue (build+deliver renditions serially)")
+    sp.add_argument("--once", action="store_true", help="process one job then exit (else loop)")
+    sp.set_defaults(fn=cmd_upscale_worker)
+    sub.add_parser("queue", help="list pending/failed upscale jobs").set_defaults(fn=cmd_queue)
     sub.add_parser("review", help="list/resolve ambiguous discs in the review queue").set_defaults(fn=cmd_review)
     sub.add_parser("status", help="show the drive, running rip/upscale jobs, and review queue").set_defaults(fn=cmd_status)
     return p

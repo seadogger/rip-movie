@@ -58,6 +58,13 @@ languages = "all"                   # "all" = keep every source audio track; or 
 languages = ["eng"]                 # keep only these subtitle languages (drop the rest)
 
 # ---- Upscaling (per source type) --------------------------------------------
+[upscale]
+mode = "queue"                      # queue = rip fast + enqueue the ~10h upscale for a worker to
+                                    # drain serially (walk-away with a stack of discs); the movie
+                                    # appears in Jellyfin at DVD quality immediately, the 1080p
+                                    # rendition lands when the worker gets to it.
+                                    # inline = upscale in the same disc run (blocks ~10h per disc).
+
 # engine: topaz-tvai | topaz-veai-handoff | realesrgan | anime4k | nnedi | none | auto
 [upscale.dvd]
 enabled        = true

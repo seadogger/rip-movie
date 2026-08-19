@@ -50,23 +50,22 @@ def _deliver(cfg: Config, file: str, title: str, year, tmdb_id, *,
             "folder": t["folder"]}
 
 
-def process_file(cfg: Config, source: str, title: str, year, tmdb_id, is_anim: bool, *,
-                 sample: Optional[float] = None, dry_run: bool = False, keep: bool = False,
-                 progress: Callable[[str], None] = print) -> dict:
-    """Rip-once, two-tier delivery, following the library's established pattern:
+def deliver_master(cfg: Config, source: str, title: str, year, tmdb_id, *,
+                   dry_run: bool = False, progress: Callable[[str], None] = print) -> dict:
+    """Deliver the lossless source rip untouched (all audio incl. DTS, original bitmap subs)."""
+    if not cfg.get("deliver.keep_source_master", True):
+        return {"status": "disabled"}
+    progress("[master] delivering the lossless source rip (all tracks) ...")
+    return _deliver(cfg, source, title, year, tmdb_id, dry_run=dry_run, progress=progress)
 
-    MASTER   = the raw lossless rip untouched (all audio incl. DTS, original bitmap subs) -> .mkv
-    RENDITION= AI-upscaled H.264 + Apple-native audio (DTS/TrueHD -> AC3, +AAC stereo) -> .mp4,
-               plus an OCR'd English .srt sidecar so subtitles survive in the direct-play file.
-    """
+
+def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_anim: bool, *,
+                      sample: Optional[float] = None, dry_run: bool = False, keep: bool = False,
+                      progress: Callable[[str], None] = print) -> dict:
+    """AI-upscaled H.264 + Apple-native audio (DTS/TrueHD -> AC3, +AAC stereo) -> .mp4, plus an
+    OCR'd English .srt sidecar. Cleans its own temps once the rendition is confirmed delivered."""
     from .enhance import enhance
     from .finalize import mux_rendition, make_subtitle_sidecar
-
-    results: dict = {}
-    if cfg.get("deliver.keep_source_master", True):
-        progress("[master] delivering the lossless source rip (all tracks) ...")
-        results["master"] = _deliver(cfg, source, title, year, tmdb_id,
-                                     dry_run=dry_run, progress=progress)
 
     work = cfg.path_for("paths.work_dir")
     work.mkdir(parents=True, exist_ok=True)
@@ -85,6 +84,7 @@ def process_file(cfg: Config, source: str, title: str, year, tmdb_id, is_anim: b
     have_srt = make_subtitle_sidecar(cfg, source, str(srt), "eng",
                                      progress=lambda s: progress("  " + s))
 
+    results: dict = {}
     results["rendition"] = _deliver(cfg, str(final), title, year, tmdb_id,
                                     dry_run=dry_run, progress=progress)
     if have_srt:                                        # deliver .srt beside the .mp4, matching name
@@ -100,6 +100,17 @@ def process_file(cfg: Config, source: str, title: str, year, tmdb_id, is_anim: b
         progress(f"[cleanup] removed {n} rendition temp file(s) from {work}")
     else:
         progress(f"[cleanup] rendition NOT delivered — keeping local files in {work} for retry")
+    return results
+
+
+def process_file(cfg: Config, source: str, title: str, year, tmdb_id, is_anim: bool, *,
+                 sample: Optional[float] = None, dry_run: bool = False, keep: bool = False,
+                 progress: Callable[[str], None] = print) -> dict:
+    """Two-tier delivery inline: master then rendition (used by the `run` command)."""
+    results = {"master": deliver_master(cfg, source, title, year, tmdb_id,
+                                        dry_run=dry_run, progress=progress)}
+    results.update(deliver_rendition(cfg, source, title, year, tmdb_id, is_anim,
+                                     sample=sample, dry_run=dry_run, keep=keep, progress=progress))
     return results
 
 
@@ -171,21 +182,31 @@ def process_disc(cfg: Config, force_title: Optional[int] = None,
         progress("no TMDb match — leaving the rip in place (name it manually with `push`)")
         return {"status": "ripped_unmatched", "file": ripped}
 
-    res = process_file(cfg, ripped, match.title, match.year, match.tmdb_id,
-                       match.is_animation, dry_run=dry_run, progress=progress)
+    # Deliver the master now (the movie appears in Jellyfin immediately at DVD quality); the slow
+    # ~10h upscale is decoupled onto a queue so a stack of discs rips back-to-back.
+    master = deliver_master(cfg, ripped, match.title, match.year, match.tmdb_id,
+                            dry_run=dry_run, progress=progress)
+    mode = str(cfg.get("upscale.mode", "queue")).lower()
 
-    # Remove the local rip ONLY once BOTH tiers are confirmed in the library — the master is now a
-    # copy in Nextcloud and the rendition is delivered, so the physical disc is never needed again.
-    ok = lambda tier: res.get(tier, {}).get("status") in ("delivered", "exists")
-    both_delivered = ok("master") and ok("rendition")
+    if mode == "queue" and not dry_run:
+        job = enqueue_upscale(cfg, ripped, match.title, match.year, match.tmdb_id, match.is_animation)
+        progress(f"[queue] rendition queued ({job.name}); rip kept as the worker's source. "
+                 f"Run `rip-movie upscale-worker` to process the queue.")
+        return {"status": "queued", "folder": match.folder, "master": master, "job": str(job)}
+
+    # inline mode (or dry-run): upscale right here, then drop the rip once both tiers are in.
+    rend = deliver_rendition(cfg, ripped, match.title, match.year, match.tmdb_id,
+                             match.is_animation, dry_run=dry_run, progress=progress)
+    m_ok = master.get("status") in ("delivered", "exists", "disabled")
+    r_ok = rend.get("rendition", {}).get("status") in ("delivered", "exists")
     if dry_run:
         progress(f"[cleanup] dry-run — leaving rip at {ripped}")
-    elif both_delivered:
+    elif m_ok and r_ok:
         _remove(ripped)
         progress(f"[cleanup] both tiers in library — removed local rip {Path(ripped).name}")
     else:
         progress(f"[cleanup] delivery incomplete — keeping rip {ripped} for retry")
-    return res
+    return {"status": rend.get("rendition", {}).get("status", "error"), "master": master, **rend}
 
 
 # --- review queue -------------------------------------------------------------
@@ -216,3 +237,71 @@ def list_reviews(cfg: Config) -> list[dict]:
         d["_file"] = str(f)
         out.append(d)
     return out
+
+
+# --- upscale queue ------------------------------------------------------------
+# Ripping is disc-bound (~20 min); upscaling is ANE-bound (~10h) and the ANE is a single device.
+# So process_disc enqueues a job (keeping the local rip as its source) and a lone worker drains
+# the queue serially. Job lifecycle by file suffix: <slug>.json (pending) -> .running -> .failed.
+def _upscale_dir(cfg: Config) -> Path:
+    d = cfg.path_for("paths.state_dir") / "upscale_queue"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def enqueue_upscale(cfg: Config, source: str, title: str, year, tmdb_id, is_anim: bool) -> Path:
+    job = {"source": str(source), "title": title, "year": year, "tmdb_id": tmdb_id,
+           "is_anim": bool(is_anim)}
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", f"{title}_{year or ''}").strip("_")[:60] or "job"
+    fn = _upscale_dir(cfg) / f"{slug}.json"
+    fn.write_text(json.dumps(job, indent=2))
+    return fn
+
+
+def list_upscale_jobs(cfg: Config) -> list[dict]:
+    """Pending jobs, oldest first. (.running / .failed are excluded — only *.json is pending.)"""
+    out = []
+    for f in sorted(_upscale_dir(cfg).glob("*.json"), key=lambda p: p.stat().st_mtime):
+        d = json.loads(f.read_text())
+        d["_file"] = str(f)
+        out.append(d)
+    return out
+
+
+def run_upscale_worker(cfg: Config, once: bool = False, poll: int = 30,
+                       progress: Callable[[str], None] = print) -> int:
+    """Drain the upscale queue one job at a time. Builds + delivers each rendition, then removes
+    the local rip. A failed job is parked as <slug>.failed (never silently retried)."""
+    import time
+    progress("upscale worker started" + (" (single pass)" if once else " — draining queue (Ctrl-C to stop)"))
+    while True:
+        jobs = list_upscale_jobs(cfg)
+        if not jobs:
+            if once:
+                return 0
+            time.sleep(poll)
+            continue
+        job = jobs[0]
+        jf = Path(job["_file"])
+        running = jf.with_suffix(".running")
+        try:
+            os.rename(jf, running)                       # claim (atomic) so a 2nd worker won't grab it
+        except OSError:
+            continue
+        src = job["source"]
+        progress(f"[upscale] {job['title']} ({job.get('year')})  <- {Path(src).name}")
+        try:
+            if not Path(src).exists():
+                raise FileNotFoundError(f"source rip is gone: {src}")
+            res = deliver_rendition(cfg, src, job["title"], job.get("year"), job.get("tmdb_id"),
+                                    job.get("is_anim", False), progress=progress)
+            if res.get("rendition", {}).get("status") not in ("delivered", "exists"):
+                raise RuntimeError("rendition was not delivered")
+            _remove(src)
+            running.unlink(missing_ok=True)
+            progress(f"[upscale] done: {job['title']} — rendition delivered, rip cleaned up")
+        except Exception as e:  # noqa: BLE001 - one bad job shouldn't kill the worker
+            os.replace(running, jf.with_suffix(".failed"))
+            progress(f"[upscale] FAILED {job['title']}: {e} (parked as {jf.with_suffix('.failed').name})")
+        if once:
+            return 0
