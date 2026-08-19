@@ -9,6 +9,7 @@ cluster checks cached so polling stays cheap.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +18,60 @@ from urllib.parse import parse_qs, urlparse
 
 from . import status
 from .config import Config
+
+# Each movie flows through these stages; the dashboard shows one swimlane per movie.
+STAGE_ORDER = ["rip", "master", "upscale", "cleanup", "jellyfin"]
+
+
+def _lane_stages(current: str, hd: bool = False, queued: bool = False, done: bool = False) -> dict:
+    """State of every stage for a movie whose current position is `current` (the pipeline is
+    linear, so earlier stages are done, later ones pending). HD/4K skip the upscale."""
+    ci = STAGE_ORDER.index(current)
+    out = {}
+    for i, s in enumerate(STAGE_ORDER):
+        if s == "upscale" and hd:
+            out[s] = "skipped"
+        elif done or i < ci:
+            out[s] = "done"
+        elif i == ci:
+            out[s] = "queued" if queued else "active"
+        else:
+            out[s] = "pending"
+    return out
+
+
+def _build_lanes(st: dict) -> list[dict]:
+    lanes: list[dict] = []
+    seen: set = set()
+
+    def add(title, year, current, detail=None, hd=False, queued=False, done=False):
+        if not title:
+            return
+        key = (re.sub(r"[^a-z0-9]", "", title.lower()), year)
+        if key in seen:
+            return
+        seen.add(key)
+        lanes.append({"title": title, "year": year, "current": current,
+                      "stages": _lane_stages(current, hd, queued, done), "detail": detail or {}})
+
+    r = st.get("ripping")
+    if r:
+        add(r.get("title"), r.get("year"), "rip",
+            {"pct": r.get("pct"), "size": r.get("size"), "elapsed": r.get("elapsed"), "note": r.get("disc")})
+    d = st.get("delivering")
+    if d:
+        add(d.get("title"), d.get("year"), "master", {"elapsed": d.get("elapsed"), "note": "uploading"})
+    u = st.get("upscaling")
+    if u:
+        cur = "cleanup" if re.search("clean", u.get("stage", ""), re.I) else "upscale"
+        add(u.get("title"), u.get("year"), cur,
+            {"pct": u.get("pct"), "eta": u.get("eta"), "size": u.get("size"),
+             "elapsed": u.get("elapsed"), "note": u.get("stage")})
+    for j in st.get("queue", []):
+        add(j.get("title"), j.get("year"), "upscale", {"note": "waiting for ANE"}, queued=True)
+    for c in st.get("done", []):
+        add(c.get("title"), c.get("year"), "jellyfin", hd=(c.get("kind") == "master"), done=True)
+    return lanes
 
 _cache: dict = {}
 
@@ -134,6 +189,7 @@ def gather(cfg: Config) -> dict:
     st["done"] = status.recent(cfg, 10)
     st["cleaned"] = status.recent_events(cfg, "cleaned", 8)
     st["cluster"] = _cached("cluster", 30, lambda: _cluster(cfg))
+    st["lanes"] = _build_lanes(st)
     return st
 
 
@@ -211,35 +267,38 @@ header{display:flex;align-items:center;gap:12px;margin-bottom:16px}
 .flow{color:var(--faint);font-family:var(--mono);font-size:11px;letter-spacing:.2px;margin-bottom:16px;
  display:flex;flex-wrap:wrap;gap:7px;align-items:center}
 .flow b{color:var(--dim);font-weight:600}.flow .arw{color:var(--acc);opacity:.55}
-.board{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;align-items:start}
-.col{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 12px}
-.col>h2{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);font-weight:700;
- display:flex;align-items:center;gap:8px;margin-bottom:12px}
-.col>h2 .n{margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:600;color:var(--tx);
- background:var(--card2);border:1px solid var(--line);border-radius:20px;padding:1px 9px;min-width:24px;text-align:center}
-.card{position:relative;background:var(--card2);border:1px solid var(--line);border-radius:10px;
- padding:11px 12px 11px 15px;margin-bottom:9px;overflow:hidden}
-.card:last-child{margin-bottom:0}
-.card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--st,var(--line))}
-.card.rip{--st:var(--st-rip)}.card.queue{--st:var(--st-queue)}.card.up{--st:var(--st-up)}
-.card.done{--st:var(--st-done)}.card.fail{--st:var(--st-fail)}
-.card.del{--st:#39b7c9}.card.cln{--st:#8b949e}
-.card .t{font-weight:620;font-size:13.5px;letter-spacing:-.1px}.card .t .yr{color:var(--dim);font-weight:400}
-.card .meta{color:var(--dim);font-family:var(--mono);font-size:11.5px;margin-top:4px;font-variant-numeric:tabular-nums}
-.pill{display:inline-flex;font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
- border-radius:5px;padding:2px 7px;margin-top:8px}
-.pill.b{background:rgba(88,166,255,.16);color:var(--acc)}
-.pill.p{background:rgba(163,113,247,.18);color:var(--purple)}
-.pill.c{background:rgba(57,183,201,.16);color:#39b7c9}
-.bar{height:5px;background:var(--bg);border-radius:4px;margin-top:9px;overflow:hidden;position:relative}
-.bar>i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accd),var(--acc));transition:width .6s}
-.bar.ind::after{content:"";position:absolute;inset:0;width:38%;border-radius:4px;
- background:linear-gradient(90deg,transparent,var(--purple),transparent);animation:sl 1.5s ease-in-out infinite}
-@keyframes sl{0%{transform:translateX(-100%)}100%{transform:translateX(280%)}}
-.empty{color:var(--faint);font-size:12px;font-style:italic;padding:8px 3px}
-.health .row{display:flex;align-items:center;gap:9px;padding:7px 2px;font-size:13px;border-bottom:1px solid var(--line)}
-.health .row:last-child{border:0}
-.health .row b{margin-left:auto;font-family:var(--mono);font-weight:600;font-variant-numeric:tabular-nums}
+/* swimlanes — one per movie */
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:10px;color:var(--faint);font-size:11px;font-family:var(--mono)}
+.legend span{display:flex;align-items:center;gap:6px}
+.board{display:flex;flex-direction:column;gap:10px}
+.lane{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 15px 14px}
+.lane-head{display:flex;align-items:baseline;gap:9px;margin-bottom:12px}
+.lane-title{font-weight:640;font-size:14.5px;letter-spacing:-.1px}
+.lane-title .yr{color:var(--dim);font-weight:400}
+.lane-cur{margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:600;border-radius:20px;padding:2px 10px}
+.cur-active{background:rgba(88,166,255,.16);color:var(--acc)}
+.cur-queued{background:rgba(210,153,34,.16);color:var(--warn)}
+.cur-done{background:rgba(63,185,80,.15);color:var(--ok)}
+.steps{display:flex;align-items:flex-start}
+.step{flex:1;min-width:76px;display:flex;flex-direction:column;align-items:center;position:relative;text-align:center}
+.step::before{content:"";position:absolute;top:6px;left:-50%;width:100%;height:2px;background:var(--line);z-index:0}
+.step:first-child::before{display:none}
+.sdot{width:14px;height:14px;border-radius:50%;background:var(--card);border:2px solid var(--line);z-index:1}
+.slabel{font-size:10px;font-weight:600;color:var(--dim);margin-top:7px;line-height:1.25}
+.sdet{font-family:var(--mono);font-size:9.5px;color:var(--acc);margin-top:2px;line-height:1.2}
+.step.done .sdot{background:var(--ok);border-color:var(--ok)}
+.step.done .slabel{color:var(--tx)}
+.step.done::before{background:var(--ok)}
+.step.active .sdot{background:var(--acc);border-color:var(--acc);box-shadow:0 0 0 4px rgba(88,166,255,.18);animation:pl2 1.8s infinite}
+.step.active .slabel{color:var(--acc)}
+.step.active::before{background:linear-gradient(90deg,var(--ok),var(--acc))}
+.step.queued .sdot{background:var(--warn);border-color:var(--warn)}
+.step.queued .slabel{color:var(--warn)}.step.queued::before{background:var(--ok)}
+.step.skipped .sdot{border-style:dashed;background:transparent;opacity:.6}
+.step.skipped .slabel{color:var(--faint);text-decoration:line-through}
+.step.skipped::before,.step.pending::before{background:var(--line)}
+@keyframes pl2{0%{box-shadow:0 0 0 0 rgba(88,166,255,.35)}70%{box-shadow:0 0 0 6px rgba(88,166,255,0)}100%{box-shadow:0 0 0 0 rgba(88,166,255,0)}}
+.empty{color:var(--faint);font-size:13px;font-style:italic;padding:26px 3px;text-align:center}
 .dot{width:8px;height:8px;border-radius:50%;flex:none}
 .dot.g{background:var(--ok);box-shadow:0 0 6px rgba(63,185,80,.5)}.dot.r{background:var(--bad)}
 footer{margin-top:22px;color:var(--faint);font-family:var(--mono);font-size:11px;display:flex;gap:8px;flex-wrap:wrap}
@@ -261,59 +320,43 @@ const esc=s=>String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[
 const human=n=>{n=+n||0;const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<4){n/=1024;i++}return n.toFixed(1)+" "+u[i]};
 const dur=s=>{s=+s||0;const h=s/3600|0,m=(s%3600)/60|0;return h?`${h}h ${m}m`:`${m}m ${(s%60|0)}s`};
 const yr=y=>y?` <span class=yr>(${esc(y)})</span>`:"";
-function col(icon,title,desc,n){const c=E("div","col");
- c.append(E("h2",null,`<span>${icon}</span><span>${title}</span>`+(n!=null?`<span class=n>${n}</span>`:"")));
- if(desc)c.append(E("div","cd",desc));return c}
-function card(cls,html){return E("div","card"+(cls?" "+cls:""),html)}
-function bar(pct){return `<div class="bar${pct==null?" ind":""}">${pct==null?"":`<i style="width:${pct}%"></i>`}</div>`}
+const STAGES=[["rip","Rip"],["master","Master → Nextcloud"],["upscale","Upscale"],["cleanup","Cleanup"],["jellyfin","In Jellyfin"]];
+function stepDetail(L,k){
+ if(L.current!==k)return "";
+ const d=L.detail||{},bits=[];
+ if(d.pct!=null)bits.push(d.pct+"%");
+ if(d.eta!=null)bits.push("ETA "+dur(d.eta));
+ if(d.elapsed!=null&&d.pct==null&&d.eta==null)bits.push(dur(d.elapsed));
+ if(d.note)bits.push(esc(d.note));
+ return bits.length?`<div class=sdet>${bits.join(" · ")}</div>`:"";
+}
+function lane(L){
+ const el=E("div","lane");
+ const st=L.stages||{};
+ const curState=st[L.current]||"active";
+ const badge=curState==="done"?"cur-done":curState==="queued"?"cur-queued":"cur-active";
+ const label=L.current==="jellyfin"?"in Jellyfin":(curState==="queued"?"queued":(STAGES.find(x=>x[0]===L.current)||["","working"])[1]);
+ el.append(E("div","lane-head",`<div class=lane-title>${esc(L.title)}${yr(L.year)}</div>
+  <div class="lane-cur ${badge}">${esc(label)}</div>`));
+ const steps=E("div","steps");
+ STAGES.forEach(([k,lab])=>{
+  const s=st[k]||"pending";
+  steps.append(E("div","step "+s,`<span class=sdot></span><span class=slabel>${lab}</span>${stepDetail(L,k)}`));
+ });
+ el.append(steps);return el;
+}
 function render(s){
  const cl=s.cluster||{},H=document.getElementById("health");
  const chip=(l,ok,v)=>`<div class=chip><span class="dot ${ok?'g':'r'}"></span>${l}${v!=null?` <b>${v}</b>`:""}</div>`;
  H.innerHTML=chip("Nextcloud",cl.nextcloud,cl.nextcloud?"online":"down")
   +chip("Jellyfin",cl.jellyfin,cl.jellyfin?"online":"down")
   +chip("Movies",cl.library!=null,cl.library!=null?cl.library:"?")
-  +chip("TV shows",cl.shows!=null,cl.shows!=null?cl.shows:"?");
+  +chip("TV shows",cl.shows!=null,cl.shows!=null?cl.shows:"?")
+  +(s.drive&&s.drive.present?chip("Disc",true,"inserted"):"");
  const b=document.getElementById("board");b.innerHTML="";
- // Disc & Rip
- const c1=col("💿","Disc &amp; Rip","MakeMKV → lossless master");
- if(s.ripping){const r=s.ripping;c1.append(card("rip",`<div class=t>${esc(r.title||r.disc||"ripping")}${yr(r.year)}</div>
-  <div class=meta>${esc(r.disc||"?")} · ${human(r.size)}${r.pct!=null?" · "+r.pct+"%":""} · ${dur(r.elapsed)}</div>
-  <span class="pill b">${r.active?"ripping":"finishing"}</span>${bar(r.pct)}`));}
- else if(s.drive&&s.drive.present)c1.append(card("",`<div class=t>Disc inserted</div><div class=meta>idle — not processing</div>`));
- else c1.append(E("div","empty","drive empty"));
- b.append(c1);
- // Master upload -> Nextcloud + Jellyfin
- const c2=col("☁️","Master → Cluster","upload + Jellyfin reindex");
- if(s.delivering){const d=s.delivering;c2.append(card("del",`<div class=t>${esc(d.title)}${yr(d.year)}</div>
-  <div class=meta>${dur(d.elapsed)}</div><span class="pill c">${esc(d.stage||"uploading")}</span>${bar(null)}`));}
- else c2.append(E("div","empty","no active upload"));
- b.append(c2);
- // Upscale queue
- const c3=col("🎞️","Upscale Queue","DVD/SD only · needs the ANE",s.queue.length);
- if(s.queue.length)s.queue.forEach((j,i)=>c3.append(card("queue",`<div class=t>${esc(j.title)}${yr(j.year)}</div><div class=meta>#${i+1} · waiting for ANE</div>`)));
- else c3.append(E("div","empty","no jobs waiting"));
- (s.failed||[]).forEach(f=>c3.append(card("fail",`<div class=t>${esc(f)}</div><div class=meta>failed — needs a look</div>`)));
- b.append(c3);
- // Upscaling now (with ETA)
- const c4=col("⚡","Upscaling · ANE","crop → SR → mux → OCR");
- if(s.upscaling){const u=s.upscaling;const eta=u.eta!=null?` · ETA ${dur(u.eta)}`:"";
-  c4.append(card("up",`<div class=t>${esc(u.title)}${yr(u.year)}</div>
-   <div class=meta>${u.pct!=null?u.pct+"% · ":""}${human(u.size)} · ${dur(u.elapsed)}${eta}</div>
-   <span class="pill p">${esc(u.stage||"working")}</span>${bar(u.pct!=null?u.pct:null)}`));}
- else c4.append(E("div","empty","ANE idle"));
- b.append(c4);
- // Cleanup
- const c5=col("🧹","Cleanup","free local temp space");
- const cleaning=s.upscaling&&/clean/i.test(s.upscaling.stage||"");
- if(cleaning)c5.append(card("cln",`<div class=t>${esc(s.upscaling.title)}</div><div class=meta>clearing temp files…</div>`));
- if(s.cleaned&&s.cleaned.length)s.cleaned.forEach(c=>c5.append(card("done",`<div class=t>${esc(c.title)}${yr(c.year)}</div><div class=meta>freed ${esc(c.detail||"temps")}</div>`)));
- else if(!cleaning)c5.append(E("div","empty","nothing to clean"));
- b.append(c5);
- // Done
- const c6=col("✅","In Jellyfin","direct-play ready",s.done.length||null);
- if(s.done.length)s.done.forEach(d=>c6.append(card("done",`<div class=t>${esc(d.title)}${yr(d.year)}</div>`)));
- else c6.append(E("div","empty","nothing finished yet"));
- b.append(c6);
+ const lanes=s.lanes||[];
+ if(!lanes.length){b.append(E("div","empty","Pipeline idle — insert a disc, or a finished title will appear here."));return;}
+ lanes.forEach(L=>b.append(lane(L)));
 }
 // search
 const R=document.getElementById("results"),Q=document.getElementById("q");let tmr;
