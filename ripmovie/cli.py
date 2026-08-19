@@ -320,6 +320,69 @@ def cmd_disc(args) -> int:
     return 0
 
 
+def _proc_lines() -> list[str]:
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,command="],
+                             capture_output=True, text=True, timeout=15).stdout
+    except Exception:  # noqa: BLE001
+        return []
+    return out.splitlines()
+
+
+def _arg_after(argv: str, flag: str) -> str:
+    parts = argv.split()
+    for i, p in enumerate(parts):
+        if p == flag and i + 1 < len(parts):
+            return parts[i + 1]
+    return ""
+
+
+def _newest_size(path_or_dir: str) -> str:
+    p = Path(path_or_dir)
+    files = [p] if p.is_file() else (sorted(p.glob("*.mkv"), key=lambda f: f.stat().st_mtime)
+                                     if p.is_dir() else [])
+    if not files:
+        return "0 B"
+    b = files[-1].stat().st_size
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if b < 1024 or unit == "TB":
+            return f"{b:.1f} {unit}" if unit != "B" else f"{b} B"
+        b /= 1024
+    return f"{b:.1f} TB"
+
+
+def cmd_status(args) -> int:
+    """Show the drive, any running rip/upscale jobs, and the review queue."""
+    cfg = _load(args)
+    from .watch import disc_present
+    from .pipeline import list_reviews
+
+    try:
+        present = disc_present(cfg)
+    except Exception:  # noqa: BLE001
+        present = False
+    print(f"Optical drive : {'disc inserted' if present else 'empty'}")
+
+    jobs = []
+    for line in _proc_lines():
+        if "makemkvcon" in line and " mkv " in line:
+            parts = line.split()
+            jobs.append(f"{OK} rip      {parts[1]:>10}  -> {_newest_size(parts[-1])}  ({parts[-1]})")
+        elif "enhance_stream.py" in line and "-o pid=" not in line:
+            outp = _arg_after(line, "--output")
+            et = line.split()[1] if len(line.split()) > 1 else "?"
+            jobs.append(f"{OK} upscale  {et:>10}  -> {_newest_size(outp)}  ({Path(outp).name})")
+    print("Active jobs   : " + ("none" if not jobs else ""))
+    for j in jobs:
+        print(f"  {j}")
+
+    revs = list_reviews(cfg)
+    print(f"Review queue  : {len(revs)} disc(s) awaiting a manual title pick"
+          + (" (run `rip-movie review`)" if revs else ""))
+    return 0
+
+
 def cmd_watch(args) -> int:
     cfg = _load(args)
     from .watch import watch
@@ -425,7 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_disc)
     sub.add_parser("watch", help="daemon: wait for discs and process each automatically").set_defaults(fn=cmd_watch)
     sub.add_parser("review", help="list/resolve ambiguous discs in the review queue").set_defaults(fn=cmd_review)
-    sub.add_parser("status", help="show jobs (TODO)").set_defaults(fn=_not_yet("status"))
+    sub.add_parser("status", help="show the drive, running rip/upscale jobs, and review queue").set_defaults(fn=cmd_status)
     return p
 
 
