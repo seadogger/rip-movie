@@ -128,21 +128,47 @@ def _idet_stats(cfg: Config, path: str, frames: int = 400) -> dict:
     return {"interlaced": tff + bff, "prog": prog, "total": tff + bff + prog + undet}
 
 
+def _real_fps(cfg: Config, path: str, interval: int = 60, at: int = 1200) -> float:
+    """The ACTUAL decoded frame rate (frames counted over `interval`s), not the container's
+    r_frame_rate. Critical because soft-telecined DVDs advertise 29.97 but decode to clean 23.976
+    progressive film -- trusting the metadata would double-decimate them into judder + A/V drift."""
+    fp = _ffprobe_bin(cfg)
+    try:
+        out = subprocess.run(
+            [fp, "-v", "error", "-select_streams", "v:0", "-count_frames",
+             "-read_intervals", f"{at}%+{interval}", "-show_entries", "stream=nb_read_frames",
+             "-of", "csv=p=0", path], capture_output=True, text=True, timeout=180).stdout.strip().rstrip(",")
+        return int(out) / interval if out.isdigit() else 0.0
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return 0.0
+
+
 def detect_cadence(cfg: Config, path: str, src_fps: float) -> tuple[str, str, str | None]:
-    """Classify source cadence -> (kind, vf_prefix, out_fps_or_None). One real detector instead
-    of trusting the (lying) stream field_order flag: idet says combed-vs-progressive, the
-    duplicate-frame rate says film(24)-vs-video(30)."""
-    eff = _dup_effective_fps(cfg, path)
-    film_rate = src_fps > 28.0 and 0 < eff < 27.0        # ~1-in-5 dups => 24fps film in a 30fps stream
+    """Classify source cadence -> (kind, vf_prefix, out_fps). Keyed off the REAL decoded frame rate
+    (not the lying container metadata): soft-telecine/native film already decode to ~24fps and must
+    be passed through untouched; only genuine 29.97 hard-telecine or interlaced video is processed.
+    Getting this wrong drops real frames -> judder + multi-second audio desync."""
+    real = _real_fps(cfg, path) or src_fps
     st = _idet_stats(cfg, path)
     combed = st["interlaced"] / max(1, st["total"]) > 0.20
-    if combed and film_rate:
-        return "hard-telecine", "fieldmatch,decimate,", "24000/1001"   # rebuild frames, then 24fps
+
+    if 22.5 <= real <= 25.5:
+        # already film-rate (native 24/25 or soft-telecine decoded clean) -> DO NOT decimate
+        out = "24000/1001" if real < 24.5 else "25"
+        return "film", "", out
+    if real >= 28.0:
+        eff = _dup_effective_fps(cfg, path)
+        dupy = 0 < eff < 27.0                                # ~1-in-5 real duplicate frames
+        if combed and dupy:
+            return "hard-telecine", "fieldmatch,decimate,", "24000/1001"   # rebuild fields, then 24
+        if combed:
+            return "interlaced", "bwdif,", None                            # true 29.97i video
+        if dupy:
+            return "telecine", "decimate,", "24000/1001"                   # 29.97 w/ dup frames -> 24
+        return "progressive-30", "", None                                  # true 30fps, keep as-is
     if combed:
-        return "interlaced", "bwdif,", None                            # true 29.97i video
-    if film_rate:
-        return "progressive-telecine", "decimate,", "24000/1001"       # dup frames -> 24fps
-    return "progressive", "", None                                     # clean, passthrough
+        return "interlaced", "bwdif,", None
+    return "progressive", "", None                                         # clean, passthrough
 
 
 def detect_crop(cfg: Config, path: str, w: int, h: int) -> Optional[tuple[int, int, int, int]]:
