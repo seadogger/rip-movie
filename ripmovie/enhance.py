@@ -128,47 +128,49 @@ def _idet_stats(cfg: Config, path: str, frames: int = 400) -> dict:
     return {"interlaced": tff + bff, "prog": prog, "total": tff + bff + prog + undet}
 
 
-def _real_fps(cfg: Config, path: str, interval: int = 60, at: int = 1200) -> float:
-    """The ACTUAL decoded frame rate (frames counted over `interval`s), not the container's
-    r_frame_rate. Critical because soft-telecined DVDs advertise 29.97 but decode to clean 23.976
-    progressive film -- trusting the metadata would double-decimate them into judder + A/V drift."""
+def _duration(cfg: Config, path: str) -> float:
     fp = _ffprobe_bin(cfg)
     try:
-        out = subprocess.run(
-            [fp, "-v", "error", "-select_streams", "v:0", "-count_frames",
-             "-read_intervals", f"{at}%+{interval}", "-show_entries", "stream=nb_read_frames",
-             "-of", "csv=p=0", path], capture_output=True, text=True, timeout=180).stdout.strip().rstrip(",")
-        return int(out) / interval if out.isdigit() else 0.0
+        out = subprocess.run([fp, "-v", "error", "-show_entries", "format=duration",
+                              "-of", "csv=p=0", path], capture_output=True, text=True,
+                             timeout=60).stdout.strip()
+        return float(out) if out else 0.0
     except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
         return 0.0
 
 
+def _check_duration(cfg: Config, output_path: str, expected: float,
+                    progress: Callable[[str], None]) -> None:
+    """A/V-safety net: the rendition's video must match the source duration, or a cadence /
+    framerate mistake would desync the audio. Fail loud instead of shipping a broken file."""
+    got = _duration(cfg, output_path)
+    if expected <= 0 or got <= 0:
+        return
+    drift = got - expected
+    if abs(drift) > 2.5:
+        raise EnhanceError(
+            f"rendition duration {got:.1f}s vs source {expected:.1f}s (drift {drift:+.1f}s) — "
+            f"cadence/framerate bug; audio would desync. Refusing to deliver.")
+    progress(f"duration OK: {got:.1f}s vs source {expected:.1f}s (drift {drift:+.1f}s)")
+
+
 def detect_cadence(cfg: Config, path: str, src_fps: float) -> tuple[str, str, str | None]:
-    """Classify source cadence -> (kind, vf_prefix, out_fps). Keyed off the REAL decoded frame rate
-    (not the lying container metadata): soft-telecine/native film already decode to ~24fps and must
-    be passed through untouched; only genuine 29.97 hard-telecine or interlaced video is processed.
-    Getting this wrong drops real frames -> judder + multi-second audio desync."""
-    real = _real_fps(cfg, path) or src_fps
+    """Classify source cadence -> (kind, vf_prefix, out_fps). The streaming decode honors the
+    container rate (r_frame_rate), so a soft-telecined DVD decodes to 29.97 WITH the 3:2 pulldown
+    frames present; `decimate` removes exactly those (uniform 4/5) -> clean 23.976 with duration
+    preserved. Only 29.97 sources get IVTC; native 24/25 film is passed through untouched. The
+    downstream duration check (enhance) is the safety net if a mixed-cadence disc slips through."""
+    eff = _dup_effective_fps(cfg, path)
+    film_rate = src_fps > 28.0 and 0 < eff < 27.0        # ~1-in-5 dups => 24fps film in a 30fps stream
     st = _idet_stats(cfg, path)
     combed = st["interlaced"] / max(1, st["total"]) > 0.20
-
-    if 22.5 <= real <= 25.5:
-        # already film-rate (native 24/25 or soft-telecine decoded clean) -> DO NOT decimate
-        out = "24000/1001" if real < 24.5 else "25"
-        return "film", "", out
-    if real >= 28.0:
-        eff = _dup_effective_fps(cfg, path)
-        dupy = 0 < eff < 27.0                                # ~1-in-5 real duplicate frames
-        if combed and dupy:
-            return "hard-telecine", "fieldmatch,decimate,", "24000/1001"   # rebuild fields, then 24
-        if combed:
-            return "interlaced", "bwdif,", None                            # true 29.97i video
-        if dupy:
-            return "telecine", "decimate,", "24000/1001"                   # 29.97 w/ dup frames -> 24
-        return "progressive-30", "", None                                  # true 30fps, keep as-is
+    if combed and film_rate:
+        return "hard-telecine", "fieldmatch,decimate,", "24000/1001"   # rebuild fields, then 24fps
     if combed:
-        return "interlaced", "bwdif,", None
-    return "progressive", "", None                                         # clean, passthrough
+        return "interlaced", "bwdif,", None                            # true 29.97i video
+    if film_rate:
+        return "progressive-telecine", "decimate,", "24000/1001"       # remove 3:2 dups -> 24fps
+    return "progressive", "", None                                     # clean (native 24/25 or 30): keep
 
 
 def detect_crop(cfg: Config, path: str, w: int, h: int) -> Optional[tuple[int, int, int, int]]:
@@ -314,6 +316,7 @@ def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
                  f"detail={detail_strength} cadence={kind} crop={'yes' if crop_vf else 'no'} "
                  f"fps={fps} range={offset:.0f}..{offset + total:.0f}s")
         _run(argv)
+        _check_duration(cfg, str(output_path), total, progress)   # A/V-sync safety net
         return {"output": str(output_path), "model": model, "scale": scale,
                 "target_height": target_h, "chunks": 0, "mode": "stream"}
 
