@@ -10,6 +10,10 @@ makemkvcon = "/opt/homebrew/bin/makemkvcon"
 handbrakecli = "HandBrakeCLI"
 ffmpeg     = "/opt/homebrew/bin/ffmpeg"
 rclone     = "rclone"
+mkvmerge   = "/opt/homebrew/bin/mkvmerge"      # mkvtoolnix: identify the VobSub track
+mkvextract = "/opt/homebrew/bin/mkvextract"    # extract DVD bitmap subs (.idx/.sub) for OCR
+tesseract  = "/opt/homebrew/bin/tesseract"     # OCR engine for the sidecar .srt
+vobsub_ocr = "~/Desktop/Development/rip-movie/tools/vobsub_ocr.py"  # VobSub -> SRT (runs on torch_python)
 realesrgan        = "~/Desktop/Development/rip-movie/tools/realesrgan/realesrgan-ncnn-vulkan-v0.2.0-macos/realesrgan-ncnn-vulkan"
 realesrgan_models = "~/Desktop/Development/rip-movie/tools/realesrgan/realesrgan-ncnn-vulkan-v0.2.0-macos/models"
 # PyTorch/MPS path for compact .pth models (e.g. realesr-general-x4v3 for live-action)
