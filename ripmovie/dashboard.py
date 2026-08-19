@@ -1,4 +1,4 @@
-"""Live pipeline dashboard: `rip-movie dashboard` -> http://localhost:8787.
+"""Live pipeline dashboard: `rip-movie dashboard` -> http://localhost:8422.
 
 A stdlib HTTP server renders a dark kanban of what the pipeline is doing right now — the disc in
 the drive, the active rip, the upscale queue, the upscale in progress (with its sub-stage), recently
@@ -418,7 +418,7 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
 
-def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8787, progress=print) -> int:
+def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8422, progress=print) -> int:
     _Handler.cfg = cfg
     httpd = ThreadingHTTPServer((host, port), _Handler)
     progress(f"dashboard -> http://{host}:{port}  (Ctrl-C to stop)")

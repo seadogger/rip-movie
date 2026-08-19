@@ -33,6 +33,9 @@ eject_when_done   = true
 tmdb_api_key      = "${TMDB_API_KEY}"   # https://www.themoviedb.org/settings/api  (v3 key)
 strip_label_tokens = ["DVD", "BLURAY", "BLU_RAY", "DISC", "SEASON", "BONUS", "4K", "UHD"]
 
+[dashboard]
+port = 8422                           # live pipeline dashboard (was 8787); override with --port
+
 [library]
 movies_subpath = "Videos/Movies"     # relative to the HomeMedia user's files root
 shows_subpath  = "Videos/TV_Shows"   # TV library (Show/Season NN/...), searched by the dashboard

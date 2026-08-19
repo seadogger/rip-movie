@@ -24,7 +24,7 @@ its turn while the next disc goes in.
 
 ## Watch it live
 
-`rip-movie dashboard` serves a live view at `http://localhost:8787` — one **swimlane per movie**,
+`rip-movie dashboard` serves a live view at `http://localhost:8422` — one **swimlane per movie**,
 each showing its progress through Rip → Master → Nextcloud → Upscale → Cleanup → In Jellyfin, with a
 library search bar and cluster health up top.
 
@@ -113,7 +113,7 @@ can't recover one, pass `--name "Armageddon" --year 1998` and the runtime match 
 
 ```bash
 rip-movie config-check                  # validate config, tools, cluster reachability
-rip-movie dashboard                     # live pipeline dashboard (kanban) at http://localhost:8787
+rip-movie dashboard                     # live pipeline dashboard (kanban) at http://localhost:8422
 rip-movie search wall-e                 # is it in the library? (movies + TV, no disc needed)
 
 rip-movie watch                         # daemon: rip each inserted disc → deliver master → queue → eject
