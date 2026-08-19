@@ -421,6 +421,17 @@ def cmd_queue(args) -> int:
     return 0
 
 
+def cmd_dashboard(args) -> int:
+    """Serve the live pipeline dashboard (kanban) at http://host:port."""
+    cfg = _load(args)
+    from .dashboard import serve
+    try:
+        return serve(cfg, host=args.host, port=args.port, progress=print)
+    except OSError as e:
+        print(f"{BAD} could not start dashboard on {args.host}:{args.port}: {e}")
+        return 1
+
+
 def cmd_watch(args) -> int:
     cfg = _load(args)
     from .watch import watch
@@ -529,6 +540,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--once", action="store_true", help="process one job then exit (else loop)")
     sp.set_defaults(fn=cmd_upscale_worker)
     sub.add_parser("queue", help="list pending/failed upscale jobs").set_defaults(fn=cmd_queue)
+    sp = sub.add_parser("dashboard", help="serve the live pipeline dashboard (kanban) in a browser")
+    sp.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
+    sp.add_argument("--port", type=int, default=8787, help="port (default 8787)")
+    sp.set_defaults(fn=cmd_dashboard)
     sub.add_parser("review", help="list/resolve ambiguous discs in the review queue").set_defaults(fn=cmd_review)
     sub.add_parser("status", help="show the drive, running rip/upscale jobs, and review queue").set_defaults(fn=cmd_status)
     return p

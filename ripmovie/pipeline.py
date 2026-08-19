@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import status
 from .config import Config
 
 
@@ -73,17 +75,26 @@ def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_an
     video = work / f"{stem}_up_video.mp4"
     final = work / f"{stem}_1080p.mp4"
     srt = work / f"{stem}_1080p.eng.srt"
+    started = time.time()
 
+    def _stage(s):
+        status.write(cfg, "upscaling", title=title, year=year, stage=s,
+                     started=started, output=str(final))
+
+    _stage("enhancing")
     progress("[rendition] enhancing (AI upscale — the slow stage) ...")
     enhance(cfg, source, str(video), is_anim, sample_seconds=sample, mux_audio=False,
             progress=lambda s: progress("  " + s))
+    _stage("muxing audio")
     progress("[rendition] muxing Apple-native audio -> .mp4 ...")
     mux_rendition(cfg, str(video), source, str(final), progress=lambda s: progress("  " + s))
     _remove(video)                                      # video-only intermediate now consumed
+    _stage("subtitle OCR")
     progress("[rendition] building English subtitle sidecar ...")
     have_srt = make_subtitle_sidecar(cfg, source, str(srt), "eng",
                                      progress=lambda s: progress("  " + s))
 
+    _stage("delivering")
     results: dict = {}
     results["rendition"] = _deliver(cfg, str(final), title, year, tmdb_id,
                                     dry_run=dry_run, progress=progress)
@@ -96,10 +107,14 @@ def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_an
     if keep or dry_run:
         pass
     elif delivered:
+        _stage("cleanup")
         n = _remove(video, final, srt)
         progress(f"[cleanup] removed {n} rendition temp file(s) from {work}")
     else:
         progress(f"[cleanup] rendition NOT delivered — keeping local files in {work} for retry")
+    status.clear(cfg, "upscaling")
+    if delivered:
+        status.complete(cfg, title=title, year=year, kind="rendition")
     return results
 
 
@@ -174,8 +189,15 @@ def process_disc(cfg: Config, force_title: Optional[int] = None,
     title_idx = force_title if force_title is not None else sel.main_feature.index
 
     rip_dir = cfg.path_for("paths.work_dir") / "rips"
+    exp = next((t.size_bytes for t in scan.titles if t.index == title_idx), 0)
+    status.write(cfg, "ripping", title=(match.title if match else scan.label),
+                 year=(match.year if match else None), disc=scan.label,
+                 expected_bytes=exp, out_dir=str(rip_dir), started=time.time())
     progress(f"ripping title #{title_idx}...")
-    ripped = rip_title(cfg, title_idx, str(rip_dir), progress=progress)
+    try:
+        ripped = rip_title(cfg, title_idx, str(rip_dir), progress=progress)
+    finally:
+        status.clear(cfg, "ripping")
     progress(f"ripped -> {ripped}")
 
     if not match:
