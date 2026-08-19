@@ -34,16 +34,21 @@ def rip_title(cfg: Config, title_index: int, output_dir: str,
     except FileNotFoundError as e:
         raise RipError(f"makemkvcon not found at {makemkv!r}") from e
 
-    last_pct, err = -1, ""
+    last_pct, err, phase = -1, "", ""
     try:
         for line in proc.stdout:                       # robot output, one record per line
             line = line.strip()
-            if line.startswith("PRGV:"):               # PRGV:current,total,max
+            if line.startswith("PRGC:"):               # current-operation name (Analyzing / Saving)
+                f = line[5:].split(",", 2)
+                name = f[2].strip().strip('"') if len(f) >= 3 else ""
+                if name and name != phase:             # makemkvcon runs 0->100% PER phase; reset so
+                    phase, last_pct = name, -1         # "Analyzing 100%" doesn't latch out the real copy
+            elif line.startswith("PRGV:"):             # PRGV:current,total,max
                 parts = line[5:].split(",")
                 if len(parts) >= 3 and parts[2].isdigit() and int(parts[2]):
                     pct = round(100 * int(parts[1]) / int(parts[2]))
                     if pct >= last_pct + 5:
-                        progress(f"ripping title {title_index}... {pct}%")
+                        progress(f"{phase or f'ripping title {title_index}'}... {pct}%")
                         last_pct = pct
             elif line.startswith("MSG:"):
                 low = line.lower()
