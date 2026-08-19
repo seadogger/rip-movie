@@ -35,6 +35,7 @@ class Match:
     genres: list[str] = field(default_factory=list)
     original_title: str = ""
     overview: str = ""
+    runtime: Optional[int] = None       # minutes, from TMDb — used to pick the right disc title
     score: float = 0.0
 
     @property
@@ -156,6 +157,7 @@ def _details(tmdb_id: int, api_key: str, fallback: dict) -> Match:
         genres=genres,
         original_title=d.get("original_title", ""),
         overview=(d.get("overview") or "")[:200],
+        runtime=d.get("runtime") or None,
     )
 
 

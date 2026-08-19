@@ -44,10 +44,14 @@ quality_rf     = 20                 # HandBrake constant-quality RF (lower = hig
 encoder_preset = "slow"            # x265 preset
 max_height     = 1080               # cap direct-play height; masters keep native res
 
+# Audio/subtitle policy for the UPSCALED rendition (the archival master keeps EVERYTHING untouched).
 [encode.audio]
-ensure_aac_stereo     = true        # always add an AAC 2.0 track (universal Apple fallback)
-ensure_dolby_surround = true        # ensure an AC3/E-AC3 5.1 exists (transcode DTS-only sources)
-keep_all_master_tracks = true       # master keeps every disc audio track untouched
+languages = "all"                   # "all" = keep every source audio track; or a list e.g. ["eng"]
+# For each kept track: keep the ORIGINAL codec (DTS/TrueHD/AC3/... preserved). For any track Apple
+# can't decode (DTS/DTS-HD/TrueHD) ADD an AC3 5.1. Always add one AAC stereo fallback (set default).
+
+[encode.subtitles]
+languages = ["eng"]                 # keep only these subtitle languages (drop the rest)
 
 # ---- Upscaling (per source type) --------------------------------------------
 # engine: topaz-tvai | topaz-veai-handoff | realesrgan | anime4k | nnedi | none | auto
@@ -84,6 +88,9 @@ enabled = false                     # 4k stays 4k
 # ---- Delivery (services are ClusterIP-only; we go through kubectl) -----------
 [deliver]
 method = "kubectl"                  # kubectl | webdav
+keep_source_master = true           # RIP ONCE: also deliver the raw lossless disc rip (all tracks,
+                                    # every language, untouched) as the archival master — re-upscale
+                                    # from it as models improve; the physical disc is never needed again
 
 [deliver.kubectl]
 context               = "default"

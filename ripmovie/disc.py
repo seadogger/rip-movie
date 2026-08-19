@@ -166,7 +166,15 @@ def _first_error(out: str) -> str:
     return ""
 
 
-def select_titles(scan: DiscScan, cfg: Config) -> Selection:
+def select_titles(scan: DiscScan, cfg: Config,
+                  runtime_min: Optional[int] = None) -> Selection:
+    """Pick the main-feature title.
+
+    When ``runtime_min`` (the TMDb runtime for the identified movie) is known, it is the strongest
+    signal: pick the title whose duration is closest to it. That cuts straight through decoy
+    playlists and episodic discs where the plain longest-title heuristic would give up. Without a
+    runtime we fall back to longest-title-with-ambiguity-guard.
+    """
     minlen = int(cfg.get("disc.min_title_seconds", 300))
     ratio = float(cfg.get("disc.ambiguous_ratio", 0.90))
 
@@ -179,13 +187,52 @@ def select_titles(scan: DiscScan, cfg: Config) -> Selection:
         return Selection(True, "no title longer than the minimum length", None, [], [], [])
 
     longest = eligible[0]
+
+    # --- Runtime signal (from TMDb) beats the longest-title heuristic when available -----------
+    if runtime_min:
+        target = runtime_min * 60
+        tol = max(180, int(0.10 * target))           # within +/-3 min or +/-10%
+        matches = sorted(
+            (t for t in eligible if abs(t.duration_sec - target) <= tol),
+            key=lambda t: abs(t.duration_sec - target),
+        )
+        if matches:
+            best = matches[0]
+            off = abs(best.duration_sec - target)
+            reason = (f"matches TMDb runtime ~{runtime_min}m "
+                      f"(title {best.hms}, off by {off // 60}:{off % 60:02d})")
+            return Selection(False, reason, best, [best], [], eligible)
+        # Nothing matches the known runtime: the identify may be wrong or the disc is unusual.
+        # Fall through to the heuristic but flag it so a human can sanity-check.
+        rt_note = f"; no title near TMDb runtime {runtime_min}m"
+    else:
+        rt_note = ""
+
     near = [t for t in eligible if t.duration_sec >= ratio * longest.duration_sec]
 
     if len(near) >= 2:
+        # Collapse duplicate entries: titles with identical duration AND chapter count (and sizes
+        # within 5%) are the same feature listed twice -- common on DVDs, not decoys. If every
+        # near-title collapses to one such group, it's not ambiguous; rip the first.
+        if _all_duplicates(near):
+            reason = (f"{len(near)} identical titles ({longest.hms}, {longest.chapters} chapters) "
+                      f"-- duplicate entries of one feature; ripping the first{rt_note}")
+            return Selection(False, reason, longest, [longest], [], eligible)
         reason = (
             f"{len(near)} titles within {int(ratio*100)}% of the longest "
-            f"({longest.hms}); likely playlist obfuscation or an episodic disc"
+            f"({longest.hms}); likely playlist obfuscation or an episodic disc{rt_note}"
         )
         return Selection(True, reason, longest, [], near, eligible)
 
-    return Selection(False, "single dominant title", longest, [longest], [], eligible)
+    return Selection(False, "single dominant title" + rt_note, longest, [longest], [], eligible)
+
+
+def _all_duplicates(titles: list[Title]) -> bool:
+    """True if every title shares one (duration, chapters) signature with sizes within 5%."""
+    sigs = {(t.duration_sec, t.chapters) for t in titles}
+    if len(sigs) != 1:
+        return False
+    sizes = [t.size_bytes for t in titles if t.size_bytes]
+    if len(sizes) >= 2 and min(sizes) < 0.95 * max(sizes):
+        return False
+    return True

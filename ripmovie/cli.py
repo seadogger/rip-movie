@@ -247,7 +247,8 @@ def cmd_run(args) -> int:
     from .identify import search_tmdb
     from .enhance import EnhanceError
     from .naming import NamingError
-    from .pipeline import deliver_file
+    from .finalize import FinalizeError
+    from .pipeline import process_file
 
     inp = args.file
     if not Path(inp).is_file():
@@ -263,13 +264,14 @@ def cmd_run(args) -> int:
         return 1
     print(f"{OK} {title} ({year})  animation={is_anim}  tmdb={(m.tmdb_id if m else None) or '?'}")
     try:
-        r = deliver_file(cfg, inp, title, year, (m.tmdb_id if m else None), is_anim,
+        r = process_file(cfg, inp, title, year, (m.tmdb_id if m else None), is_anim,
                          sample=args.sample, dry_run=args.dry_run,
                          keep=args.keep_intermediate, progress=print)
-    except (EnhanceError, NamingError) as e:
+    except (EnhanceError, NamingError, FinalizeError) as e:
         print(f"{BAD} {e}")
         return 1
-    return 0 if r.get("status") in ("delivered", "exists", "dry_run") else 1
+    rend = r.get("rendition", {})
+    return 0 if rend.get("status") in ("delivered", "exists", "dry_run") else 1
 
 
 def cmd_rip(args) -> int:
@@ -309,7 +311,8 @@ def cmd_disc(args) -> int:
     cfg = _load(args)
     from .pipeline import process_disc
     try:
-        r = process_disc(cfg, force_title=args.title, dry_run=args.dry_run, progress=print)
+        r = process_disc(cfg, force_title=args.title, name_hint=args.name,
+                         year_hint=args.year, dry_run=args.dry_run, progress=print)
     except Exception as e:  # noqa: BLE001
         print(f"{BAD} {e}")
         return 1
@@ -416,6 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_rip)
     sp = sub.add_parser("disc", help="process the disc in the drive end-to-end (identify→rip→upscale→deliver)")
     sp.add_argument("--title", type=int, help="force a title index (resolves an ambiguous disc)")
+    sp.add_argument("--name", help="movie title hint when the disc label is unreadable (e.g. 'Armageddon')")
+    sp.add_argument("--year", type=int, help="release year hint (with --name)")
     sp.add_argument("--dry-run", action="store_true", help="rip + enhance, skip delivery")
     sp.set_defaults(fn=cmd_disc)
     sub.add_parser("watch", help="daemon: wait for discs and process each automatically").set_defaults(fn=cmd_watch)

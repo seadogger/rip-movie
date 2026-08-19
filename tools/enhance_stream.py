@@ -52,6 +52,7 @@ def main() -> int:
     ap.add_argument("--detail", type=float, default=0.0)
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--ffprobe", default="ffprobe")
+    ap.add_argument("--no-audio", action="store_true", help="video only (audio muxed downstream)")
     a = ap.parse_args()
 
     sw, sh = probe_dims(a.ffprobe, a.input)
@@ -72,14 +73,19 @@ def main() -> int:
     enc = [a.ffmpeg, "-v", "error", "-y",
            "-f", "rawvideo", "-pix_fmt", "rgb24",
            "-s", f"{a.out_w}x{a.target_h}", "-framerate", a.fps, "-i", "-"]
-    if a.ss:
-        enc += ["-ss", str(a.ss)]
-    enc += ["-i", a.input]
-    if a.t:
-        enc += ["-t", str(a.t)]
-    enc += ["-map", "0:v:0", "-map", "1:a?", "-c:v", "libx264", "-crf", "16",
-            "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",
-            "-shortest", a.output]
+    if a.no_audio:
+        # video-only: the proper audio/subtitle set is muxed from the source afterward (finalize)
+        enc += ["-map", "0:v:0", "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+                "-pix_fmt", "yuv420p", a.output]
+    else:
+        if a.ss:
+            enc += ["-ss", str(a.ss)]
+        enc += ["-i", a.input]
+        if a.t:
+            enc += ["-t", str(a.t)]
+        enc += ["-map", "0:v:0", "-map", "1:a?", "-c:v", "libx264", "-crf", "16",
+                "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",
+                "-shortest", a.output]
 
     dp = subprocess.Popen(dec, stdout=subprocess.PIPE)
     ep = subprocess.Popen(enc, stdin=subprocess.PIPE)

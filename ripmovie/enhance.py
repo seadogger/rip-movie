@@ -156,7 +156,8 @@ def _scale_for(cfg: Config, model: str) -> int:
 
 def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
             model: Optional[str] = None, sample_seconds: Optional[float] = None,
-            sample_start: float = 0.0, progress: Callable[[str], None] = print) -> dict:
+            sample_start: float = 0.0, mux_audio: bool = True,
+            progress: Callable[[str], None] = print) -> dict:
     ff = cfg.get("paths.ffmpeg", "ffmpeg")
     model = choose_model(cfg, is_animation, model or cfg.get("upscale.dvd.engine", "auto"))
     scale = _scale_for(cfg, model)
@@ -218,6 +219,8 @@ def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
                 "--ffmpeg", ff, "--ffprobe", _ffprobe_bin(cfg)]
         if sample_seconds:
             argv += ["--ss", str(offset), "--t", str(total)]
+        if not mux_audio:
+            argv.append("--no-audio")
         progress(f"streaming CoreML/ANE  engine={model} target={out_w}x{target_h} "
                  f"detail={detail_strength} cadence={kind} fps={fps} "
                  f"range={offset:.0f}..{offset + total:.0f}s")
