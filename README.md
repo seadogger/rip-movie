@@ -22,6 +22,14 @@ Ripping is disc-bound (~20 min); upscaling is ANE-bound (~10 h) on a single Neur
 two are **decoupled by a queue**. A disc rips and delivers its master fast, then its upscale waits
 its turn while the next disc goes in.
 
+## Watch it live
+
+`rip-movie dashboard` serves a live view at `http://localhost:8787` — one **swimlane per movie**,
+each showing its progress through Rip → Master → Nextcloud → Upscale → Cleanup → In Jellyfin, with a
+library search bar and cluster health up top.
+
+![The rip-movie dashboard — one swimlane per movie](docs/dashboard.png)
+
 ## The environment this is built for
 
 | Piece | Detail |
