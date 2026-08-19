@@ -211,6 +211,13 @@ def process_disc(cfg: Config, force_title: Optional[int] = None,
         status.clear(cfg, "ripping")
     progress(f"ripped -> {ripped}")
 
+    # The disc is only needed for the rip; the master upload + upscale work from the local copy.
+    # Eject now so a stack of discs can be swapped through back-to-back.
+    if cfg.get("disc.eject_when_done", True):
+        from .watch import eject
+        eject(cfg)
+        progress("ejected — safe to load the next disc")
+
     if not match:
         progress("no TMDb match — leaving the rip in place (name it manually with `push`)")
         return {"status": "ripped_unmatched", "file": ripped}
