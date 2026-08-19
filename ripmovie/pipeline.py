@@ -57,8 +57,14 @@ def deliver_master(cfg: Config, source: str, title: str, year, tmdb_id, *,
     """Deliver the lossless source rip untouched (all audio incl. DTS, original bitmap subs)."""
     if not cfg.get("deliver.keep_source_master", True):
         return {"status": "disabled"}
-    progress("[master] delivering the lossless source rip (all tracks) ...")
-    return _deliver(cfg, source, title, year, tmdb_id, dry_run=dry_run, progress=progress)
+    progress("[master] uploading the lossless master to Nextcloud + reindexing Jellyfin ...")
+    if not dry_run:
+        status.write(cfg, "delivering", title=title, year=year,
+                     stage="uploading master → Nextcloud + Jellyfin", started=time.time())
+    try:
+        return _deliver(cfg, source, title, year, tmdb_id, dry_run=dry_run, progress=progress)
+    finally:
+        status.clear(cfg, "delivering")
 
 
 def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_anim: bool, *,
@@ -76,15 +82,18 @@ def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_an
     final = work / f"{stem}_1080p.mp4"
     srt = work / f"{stem}_1080p.eng.srt"
     started = time.time()
+    progf = cfg.path_for("paths.state_dir") / "status" / "upscale_progress.json"
+    progf.parent.mkdir(parents=True, exist_ok=True)
+    _remove(progf)                                       # clear any stale progress from a prior run
 
     def _stage(s):
         status.write(cfg, "upscaling", title=title, year=year, stage=s,
-                     started=started, output=str(final))
+                     started=started, output=str(final), progress_file=str(progf))
 
     _stage("enhancing")
     progress("[rendition] enhancing (AI upscale — the slow stage) ...")
     enhance(cfg, source, str(video), is_anim, sample_seconds=sample, mux_audio=False,
-            progress=lambda s: progress("  " + s))
+            progress_file=str(progf), progress=lambda s: progress("  " + s))
     _stage("muxing audio")
     progress("[rendition] muxing Apple-native audio -> .mp4 ...")
     mux_rendition(cfg, str(video), source, str(final), progress=lambda s: progress("  " + s))
@@ -108,8 +117,10 @@ def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_an
         pass
     elif delivered:
         _stage("cleanup")
-        n = _remove(video, final, srt)
+        n = _remove(video, final, srt, progf)
         progress(f"[cleanup] removed {n} rendition temp file(s) from {work}")
+        status.log_event(cfg, "cleaned", title=title, year=year,
+                         detail=f"{n} rendition temp file(s)")
     else:
         progress(f"[cleanup] rendition NOT delivered — keeping local files in {work} for retry")
     status.clear(cfg, "upscaling")
@@ -204,27 +215,47 @@ def process_disc(cfg: Config, force_title: Optional[int] = None,
         progress("no TMDb match — leaving the rip in place (name it manually with `push`)")
         return {"status": "ripped_unmatched", "file": ripped}
 
-    # Deliver the master now (the movie appears in Jellyfin immediately at DVD quality); the slow
-    # ~10h upscale is decoupled onto a queue so a stack of discs rips back-to-back.
+    # Deliver the master now (the movie appears in Jellyfin immediately at source quality).
     master = deliver_master(cfg, ripped, match.title, match.year, match.tmdb_id,
                             dry_run=dry_run, progress=progress)
-    mode = str(cfg.get("upscale.mode", "queue")).lower()
+    m_ok = master.get("status") in ("delivered", "exists", "disabled")
 
+    # Only SD/DVD sources are upscaled. The CoreML model is 480p-native, and 1080p/4K are already
+    # full resolution — running them through it would downscale then re-upscale, hurting quality.
+    # So HD/UHD ship as the ripped master and we're done.
+    from .naming import probe
+    try:
+        height = probe(cfg, ripped)["height"]
+    except Exception:  # noqa: BLE001
+        height = 0
+    sd = 0 < height <= int(cfg.get("upscale.dvd.sd_max_height", 576))
+
+    if not sd:
+        if not dry_run and m_ok:
+            _remove(ripped)
+            status.log_event(cfg, "cleaned", title=match.title, year=match.year,
+                             detail="rip (HD/4K master only)")
+            status.complete(cfg, title=match.title, year=match.year, kind="master")
+            progress(f"[done] {match.folder} — {height or '?'}p master delivered (no upscale "
+                     f"needed for HD/4K); local rip cleaned up")
+        return {"status": "master_only", "folder": match.folder, "height": height, "master": master}
+
+    mode = str(cfg.get("upscale.mode", "queue")).lower()
     if mode == "queue" and not dry_run:
         job = enqueue_upscale(cfg, ripped, match.title, match.year, match.tmdb_id, match.is_animation)
-        progress(f"[queue] rendition queued ({job.name}); rip kept as the worker's source. "
-                 f"Run `rip-movie upscale-worker` to process the queue.")
+        progress(f"[queue] {height}p SD -> rendition queued ({job.name}); rip kept as the worker's "
+                 f"source. Run `rip-movie upscale-worker` to process the queue.")
         return {"status": "queued", "folder": match.folder, "master": master, "job": str(job)}
 
     # inline mode (or dry-run): upscale right here, then drop the rip once both tiers are in.
     rend = deliver_rendition(cfg, ripped, match.title, match.year, match.tmdb_id,
                              match.is_animation, dry_run=dry_run, progress=progress)
-    m_ok = master.get("status") in ("delivered", "exists", "disabled")
     r_ok = rend.get("rendition", {}).get("status") in ("delivered", "exists")
     if dry_run:
         progress(f"[cleanup] dry-run — leaving rip at {ripped}")
     elif m_ok and r_ok:
         _remove(ripped)
+        status.log_event(cfg, "cleaned", title=match.title, year=match.year, detail="rip")
         progress(f"[cleanup] both tiers in library — removed local rip {Path(ripped).name}")
     else:
         progress(f"[cleanup] delivery incomplete — keeping rip {ripped} for retry")

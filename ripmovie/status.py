@@ -40,19 +40,18 @@ def read(cfg: Config, name: str):
         return None
 
 
-def complete(cfg: Config, **entry) -> None:
-    entry["finished"] = time.time()
+def log_event(cfg: Config, name: str, **entry) -> None:
+    entry["ts"] = time.time()
     try:
-        with open(_dir(cfg) / "completed.jsonl", "a") as f:
+        with open(_dir(cfg) / f"{name}.jsonl", "a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
 
 
-def recent(cfg: Config, n: int = 12) -> list[dict]:
-    p = _dir(cfg) / "completed.jsonl"
+def recent_events(cfg: Config, name: str, n: int = 12) -> list[dict]:
     try:
-        lines = p.read_text().splitlines()[-n:]
+        lines = (_dir(cfg) / f"{name}.jsonl").read_text().splitlines()[-n:]
     except OSError:
         return []
     out = []
@@ -62,3 +61,11 @@ def recent(cfg: Config, n: int = 12) -> list[dict]:
         except ValueError:
             pass
     return out[::-1]
+
+
+def complete(cfg: Config, **entry) -> None:
+    log_event(cfg, "completed", **entry)
+
+
+def recent(cfg: Config, n: int = 12) -> list[dict]:
+    return recent_events(cfg, "completed", n)

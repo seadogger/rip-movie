@@ -34,7 +34,8 @@ tmdb_api_key      = "${TMDB_API_KEY}"   # https://www.themoviedb.org/settings/ap
 strip_label_tokens = ["DVD", "BLURAY", "BLU_RAY", "DISC", "SEASON", "BONUS", "4K", "UHD"]
 
 [library]
-movies_subpath = "Videos/Movies"    # relative to the HomeMedia user's files root
+movies_subpath = "Videos/Movies"     # relative to the HomeMedia user's files root
+shows_subpath  = "Videos/TV_Shows"   # TV library (Show/Season NN/...), searched by the dashboard
 
 [encode]
 keep_archival_master = true         # keep the lossless disc remux (.mkv) as the "rip once" keeper
@@ -68,6 +69,9 @@ mode = "queue"                      # queue = rip fast + enqueue the ~10h upscal
 # engine: topaz-tvai | topaz-veai-handoff | realesrgan | anime4k | nnedi | none | auto
 [upscale.dvd]
 enabled        = true
+sd_max_height  = 576                # only sources <=576p (DVD/SD) are AI-upscaled. 1080p/4K are
+                                    # already full-res AND the model is 480p-native, so HD/UHD ship
+                                    # as the ripped master with no upscale.
 target_height  = 1080               # "1080p minimum" rule; AI output is downscaled to this
 max_width      = 1920               # cap rendition width; scope (2.35) content becomes ~1920x818
 autocrop       = "auto"             # auto|off. Detect + strip baked-in black bars (4:3 letterbox /

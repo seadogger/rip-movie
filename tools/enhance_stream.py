@@ -6,6 +6,8 @@ in a single pass. Detail-transfer (grain-extract/merge, luma-only) is done in nu
 ffmpeg version we validated.
 """
 import argparse
+import json
+import os
 import queue
 import subprocess
 import sys
@@ -23,6 +25,32 @@ def probe_dims(ffprobe: str, path: str) -> tuple[int, int]:
         capture_output=True, text=True).stdout.strip()
     w, h = out.splitlines()[0].split("x")[:2]
     return int(w), int(h)
+
+
+def _fps_float(x: str) -> float:
+    try:
+        return float(x.split("/")[0]) / float(x.split("/")[1]) if "/" in x else float(x)
+    except (ValueError, ZeroDivisionError):
+        return 24.0
+
+
+def _duration(ffprobe: str, path: str) -> float:
+    try:
+        out = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration",
+                              "-of", "csv=p=0", path], capture_output=True, text=True).stdout.strip()
+        return float(out) if out else 0.0
+    except (ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def _write_progress(path: str, done: int, total: int) -> None:
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"done": done, "total": total}))
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def compose(ai_rgb: np.ndarray, src_rgb: np.ndarray, w: int, h: int, strength: float) -> np.ndarray:
@@ -53,9 +81,14 @@ def main() -> int:
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--ffprobe", default="ffprobe")
     ap.add_argument("--no-audio", action="store_true", help="video only (audio muxed downstream)")
+    ap.add_argument("--progress-file", default="", help="write {done,total} frame progress here")
     a = ap.parse_args()
 
     sw, sh = probe_dims(a.ffprobe, a.input)
+    total_est = 0
+    if a.progress_file:
+        secs = a.t if a.t else _duration(a.ffprobe, a.input)
+        total_est = int(secs * _fps_float(a.fps)) if secs else 0
     model = ct.models.MLModel(a.model, compute_units=ct.ComputeUnit.CPU_AND_NE)
     ikey = model._spec.description.input[0].name
     okey = model._spec.description.output[0].name
@@ -123,12 +156,16 @@ def main() -> int:
             ai = (np.clip(ai_raw[0], 0, 1).transpose(1, 2, 0) * 255).astype(np.uint8)
             ep.stdin.write(compose(ai, src, a.out_w, a.target_h, a.detail).tobytes())
             n += 1
+            if a.progress_file and n % 48 == 0:
+                _write_progress(a.progress_file, n, total_est)
     finally:
         dp.stdout.close()
         ep.stdin.close()
         dp.wait()
         ep.wait()
         prod.join()
+    if a.progress_file:
+        _write_progress(a.progress_file, n, max(total_est, n))
     if "produce" in err:
         raise err["produce"]
     print(f"streamed {n} frames")

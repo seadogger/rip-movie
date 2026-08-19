@@ -63,6 +63,17 @@ class SearchResult:
 
 
 @dataclass
+class ShowResult:
+    folder: str
+    title: str
+    year: str
+    seasons: int = 0
+    episodes: int = 0
+    score: int = 0
+    match: str = ""
+
+
+@dataclass
 class LibraryHit:
     exists: bool
     folder: str
@@ -145,6 +156,72 @@ def search(cfg: Config, query: str, tree: dict[str, list[MovieFile]] | None = No
             results.append(SearchResult(folder, title, year,
                                         sorted(files, key=lambda f: -f.size_bytes),
                                         score, how))
+    results.sort(key=lambda r: (-r.score, r.title.lower()))
+    return results
+
+
+def shows_dir(cfg: Config) -> str:
+    data = cfg.require("deliver.kubectl.data_path").rstrip("/")
+    sub = cfg.get("library.shows_subpath", "Videos/TV_Shows").strip("/")
+    return f"{data}/{sub}"
+
+
+_EP_RE = re.compile(r"\.(mkv|mp4|m4v|avi|ts|mov)$", re.I)
+
+
+def list_show_tree(cfg: Config) -> dict[str, dict]:
+    """{show_folder: {'seasons': int, 'episodes': int}} via one `find` in the Nextcloud pod."""
+    k = cfg.get("deliver.kubectl", {})
+    ns = k.get("nextcloud_namespace", "nextcloud")
+    pod = kube.pod_name(ns, k.get("nextcloud_pod_selector", "app.kubernetes.io/name=nextcloud"),
+                        context=k.get("context"))
+    try:
+        out = kube.exec_in(
+            ns, pod,
+            ["find", shows_dir(cfg), "-mindepth", "1", "-maxdepth", "3", "-printf", r"%y\t%P\n"],
+            container=k.get("nextcloud_container", "nextcloud"), context=k.get("context"),
+        )
+    except kube.KubeError:
+        return {}
+    shows: dict[str, dict] = {}
+    for line in out.splitlines():
+        ftype, _, rel = line.partition("\t")
+        if not rel:
+            continue
+        parts = rel.split("/")
+        show = parts[0]
+        s = shows.setdefault(show, {"seasons": set(), "episodes": 0})
+        if len(parts) == 2 and ftype == "d":
+            s["seasons"].add(parts[1])
+        elif ftype == "f" and _EP_RE.search(parts[-1]):
+            s["episodes"] += 1
+    return {name: {"seasons": len(v["seasons"]), "episodes": v["episodes"]}
+            for name, v in shows.items()}
+
+
+def search_shows(cfg: Config, query: str,
+                 tree: dict[str, dict] | None = None) -> list[ShowResult]:
+    if tree is None:
+        tree = list_show_tree(cfg)
+    q = query.strip()
+    q = _YEAR_RE.match(q).group(1).strip() if _YEAR_RE.match(q) else q
+    qn, qns = _norm(q), _nospace(q)
+    qtok = set(qn.split())
+    results: list[ShowResult] = []
+    for folder, info in tree.items():
+        title, year = _strip_year(folder)
+        fn, fns = _norm(title), _nospace(title)
+        ftok = set(fn.split())
+        score, how = 0, ""
+        if qn == fn or qns == fns:
+            score, how = 100, "exact"
+        elif qtok and qtok <= ftok:
+            score, how = 70, "title"
+        elif qn and (qn in fn or qns in fns):
+            score, how = 50, "substring"
+        if score:
+            results.append(ShowResult(folder, title, year, info["seasons"], info["episodes"],
+                                      score, how))
     results.sort(key=lambda r: (-r.score, r.title.lower()))
     return results
 
