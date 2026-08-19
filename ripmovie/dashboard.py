@@ -235,6 +235,8 @@ header{display:flex;align-items:center;gap:12px;margin-bottom:16px}
  box-shadow:0 0 0 0 rgba(63,185,80,.55);animation:pl 2.2s infinite}
 @keyframes pl{0%{box-shadow:0 0 0 0 rgba(63,185,80,.5)}70%{box-shadow:0 0 0 7px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
 .live{margin-left:auto;color:var(--dim);font-family:var(--mono);font-size:12px}
+.cfglink{color:var(--dim);text-decoration:none;font-size:12px;margin-left:14px}
+.cfglink:hover{color:var(--acc)}
 /* cluster health strip */
 .hbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
 .chip{display:flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--line);
@@ -306,7 +308,8 @@ footer .k{color:var(--dim)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style></head><body><div class=wrap>
 <header><div class=brand>rip<b>·</b>movie <span class=sub>pipeline</span></div>
-<span class=pulse></span><div class=live id=ts>connecting…</div></header>
+<span class=pulse></span><div class=live id=ts>connecting…</div>
+<a class=cfglink href="/config">⚙ config</a></header>
 <div class=hbar id=health></div>
 <div class=search><span class=mag>⌕</span>
  <input id=q type=search autocomplete=off spellcheck=false placeholder="Search your library — movies &amp; TV shows…">
@@ -390,6 +393,99 @@ tick();setInterval(tick,2500);
 </script></body></html>"""
 
 
+CONFIG_PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>rip·movie — config</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--card2:#1c2330;--line:#2a3038;--line2:#30363d;--tx:#e6edf3;
+ --dim:#8b949e;--faint:#6e7681;--acc:#58a6ff;--ok:#3fb950;--bad:#f85149;--warn:#d29922;
+ --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+ --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Helvetica,Arial,sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:var(--sans);font-size:14px;padding:22px 22px 60px}
+.wrap{max-width:960px;margin:0 auto}
+header{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.brand{font-size:19px;font-weight:680}.brand b{color:var(--acc)}.brand .sub{color:var(--dim);font-weight:400}
+a.back{color:var(--acc);text-decoration:none;font-size:13px}
+.tools{margin-left:auto;display:flex;gap:10px;align-items:center}
+button{background:var(--card2);color:var(--tx);border:1px solid var(--line2);border-radius:8px;
+ padding:7px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+button:hover{border-color:var(--acc)}button:disabled{opacity:.6;cursor:default}
+.note{color:var(--dim);font-size:12px;margin:6px 0 18px}
+.sec{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:6px 16px 12px;margin-bottom:14px}
+.sec>h2{font-family:var(--mono);font-size:12px;color:var(--acc);font-weight:700;letter-spacing:.3px;
+ padding:12px 0 4px;border-bottom:1px solid var(--line);margin-bottom:6px}
+.row{display:grid;grid-template-columns:210px 1fr;gap:10px 16px;padding:10px 0;border-bottom:1px solid var(--line);align-items:start}
+.row:last-child{border:0}
+.k{font-family:var(--mono);font-size:13px;font-weight:600;padding-top:7px;word-break:break-word}
+.k .st{display:inline-block;font-size:9px;font-weight:700;color:var(--warn);background:rgba(210,153,34,.15);
+ border-radius:4px;padding:1px 5px;margin-left:6px;text-transform:uppercase;letter-spacing:.4px;vertical-align:middle}
+.val{display:flex;flex-direction:column;gap:5px}
+.inp{width:100%;max-width:520px;background:var(--card2);border:1px solid var(--line2);border-radius:8px;
+ color:var(--tx);font:inherit;font-family:var(--mono);font-size:13px;padding:8px 11px;outline:none}
+.inp:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(88,166,255,.14)}
+input[type=checkbox].inp{width:auto;max-width:none;transform:scale(1.25);cursor:pointer;accent-color:var(--acc)}
+.cmt{color:var(--dim);font-size:11.5px;line-height:1.4;max-width:560px}
+.badge{font-family:var(--mono);font-size:11px;grid-column:2;color:var(--faint)}
+.badge.ok{color:var(--ok)}.badge.bad{color:var(--bad)}
+.row.saved{background:rgba(63,185,80,.06)}.row.err{background:rgba(248,81,73,.08)}
+.row{transition:background .3s}
+</style></head><body><div class=wrap>
+<header><div class=brand>rip<b>·</b>movie <span class=sub>config</span></div>
+<div class=tools><a class=back href="/">← dashboard</a><button id=test>Run tests</button></div></header>
+<div class=note>Edits save on change and are written back to <code>rip-movie.toml</code> (comments preserved).
+Secrets are stored in <code>secrets.env</code>. Some changes (ports, daemons) apply on the next run.</div>
+<div id=cfg></div></div>
+<script>
+const E=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e};
+const esc=s=>String(s).replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
+const cid=s=>"b_"+String(s).replace(/[^a-z0-9]/gi,"_");
+function row(e){
+ const r=E("div","row");
+ r.append(E("div","k",esc(e.key)+(e.secret?' <span class=st>secret</span>':'')));
+ const val=E("div","val");let inp;
+ if(e.type==="bool"){inp=E("input");inp.type="checkbox";inp.checked=e.value===true;}
+ else if(e.type==="int"||e.type==="float"){inp=E("input");inp.type="number";inp.value=e.value;if(e.type==="float")inp.step="any";}
+ else if(e.type==="secret"){inp=E("input");inp.type="password";inp.placeholder=e.secret_set?"•••••••• (set — blank keeps it)":"not set";}
+ else if(e.type==="list"){inp=E("input");inp.type="text";inp.value=(e.value||[]).join(", ");}
+ else{inp=E("input");inp.type="text";inp.value=e.value;}
+ inp.className="inp";inp.addEventListener("change",()=>save(e,inp,r));
+ val.append(inp);
+ if(e.comment)val.append(E("div","cmt",esc(e.comment)));
+ const badge=E("div","badge");badge.id=cid(e.dotted);
+ r.append(val);r.append(badge);return r;
+}
+async function save(e,inp,r){
+ let v;
+ if(e.type==="bool")v=inp.checked;
+ else if(e.type==="secret"){if(!inp.value)return;v=inp.value;}
+ else v=inp.value;
+ let ok=false;try{ok=(await(await fetch("api/config",{method:"POST",headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({key:e.dotted,value:v})})).json()).ok;}catch(x){}
+ r.classList.remove("saved","err");void r.offsetWidth;r.classList.add(ok?"saved":"err");
+ setTimeout(()=>r.classList.remove("saved","err"),1400);
+ if(e.type==="secret"&&ok){inp.value="";inp.placeholder="•••••••• (set — blank keeps it)";}
+}
+async function load(){
+ const ents=await(await fetch("api/config")).json();
+ const bySec={};ents.forEach(e=>(bySec[e.section]=bySec[e.section]||[]).push(e));
+ const root=document.getElementById("cfg");root.innerHTML="";
+ Object.keys(bySec).forEach(sec=>{
+  const c=E("div","sec");c.append(E("h2",null,esc(sec||"(root)")));
+  bySec[sec].forEach(e=>c.append(row(e)));root.append(c);
+ });
+}
+document.getElementById("test").addEventListener("click",async()=>{
+ const btn=document.getElementById("test");btn.textContent="Testing…";btn.disabled=true;
+ try{const res=await(await fetch("api/config/test")).json();
+  Object.entries(res).forEach(([k,v])=>{const b=document.getElementById(cid(k));
+   if(b){b.className="badge "+(v.ok?"ok":"bad");b.textContent=(v.ok?"✓ ":"✗ ")+v.detail;}});
+ }catch(x){}
+ btn.textContent="Run tests";btn.disabled=false;
+});
+load();
+</script></body></html>"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     cfg: Config = None  # set by serve()
 
@@ -397,13 +493,34 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        from . import config_edit
         if self.path.startswith("/api/state"):
             self._send(200, "application/json", json.dumps(gather(self.cfg)).encode())
         elif self.path.startswith("/api/search"):
             q = parse_qs(urlparse(self.path).query).get("q", [""])[0]
             self._send(200, "application/json", json.dumps(search(self.cfg, q)).encode())
+        elif self.path.startswith("/api/config/test"):
+            cfg = Config.load(self.cfg.path)          # reload so freshly-saved secrets are tested
+            self._send(200, "application/json", json.dumps(config_edit.test_all(cfg)).encode())
+        elif self.path == "/api/config":
+            self._send(200, "application/json", json.dumps(config_edit.entries(self.cfg.path)).encode())
+        elif self.path in ("/config", "/config.html"):
+            self._send(200, "text/html; charset=utf-8", CONFIG_PAGE.encode())
         elif self.path in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", PAGE.encode())
+        else:
+            self._send(404, "text/plain", b"not found")
+
+    def do_POST(self):
+        from . import config_edit
+        if self.path == "/api/config":
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+                config_edit.set_value(self.cfg.path, body["key"], body["value"])
+                self._send(200, "application/json", b'{"ok":true}')
+            except Exception as e:  # noqa: BLE001
+                self._send(400, "application/json", json.dumps({"ok": False, "error": str(e)}).encode())
         else:
             self._send(404, "text/plain", b"not found")
 
