@@ -430,6 +430,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Line-buffer stdout so progress ("ripping... 40%") appears live even when redirected to a
+    # log file or pipe (the watch daemon / `nohup ... > log` case) rather than block-buffering.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     _load_secrets()
     args = build_parser().parse_args(argv)
     try:
