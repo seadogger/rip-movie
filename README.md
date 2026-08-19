@@ -1,140 +1,149 @@
 # rip-movie
 
-Hands-off pipeline that takes a physical disc from tray to Jellyfin: rip → (optional AI
-upscale) → encode → name to schema → deliver into Nextcloud → refresh Jellyfin.
+**Insert a disc, walk away.** `rip-movie` takes a physical DVD/Blu-ray from the tray to Jellyfin
+with no babysitting: it rips the disc, delivers a lossless master to Nextcloud so Jellyfin picks it
+up immediately, and — for standard-def discs — queues an AI upscale that lands a 1080p, Apple
+direct-play rendition beside it. Feed in a stack of discs; they rip back-to-back while the upscales
+churn through a queue overnight.
 
-You put a disc in the drive. `rip-movie` does the rest.
+```mermaid
+flowchart LR
+  disc([💿 disc]) --> rip[rip · MakeMKV]
+  rip --> master[master .mkv<br/>→ Nextcloud → Jellyfin]
+  master --> gate{≤ 576p?}
+  gate -- "HD / 4K" --> done1([✅ in Jellyfin])
+  gate -- "DVD / SD" --> queue[[upscale queue]]
+  queue --> worker[upscale worker · ANE]
+  worker --> rend[1080p .mp4 + .srt<br/>→ Nextcloud → Jellyfin]
+  rend --> clean[cleanup] --> done2([✅ in Jellyfin])
+```
+
+Ripping is disc-bound (~20 min); upscaling is ANE-bound (~10 h) on a single Neural Engine — so the
+two are **decoupled by a queue**. A disc rips and delivers its master fast, then its upscale waits
+its turn while the next disc goes in.
 
 ## The environment this is built for
 
 | Piece | Detail |
 |---|---|
-| Rip station | This Mac (Apple M1, macOS) + USB ASUS BW-16D1HT BD/DVD drive |
-| Tools | `makemkvcon`, `HandBrakeCLI`, `ffmpeg`, `rclone`, `kubectl` |
-| Library store | Nextcloud user **HomeMedia** → `Videos/Movies/` on a 6 TB CephFS |
-| Player | Jellyfin, reading that CephFS **read-only** at `/media/data/HomeMedia/files/Videos/Movies/` |
-| Cluster | 4× Raspberry Pi 5 (k3s). **No hardware video encoder** — Jellyfin can never transcode in real time |
-| Clients | Apple TV, iPhone, iPad only (all HEVC 10-bit/HDR capable; no browsers; **no DTS decode**) |
+| Rip station | Mac (Apple silicon) + USB ASUS BW-16D1HT BD/DVD drive |
+| Tools | `makemkvcon`, `ffmpeg`, `tesseract` + `mkvtoolnix` (subtitle OCR), `kubectl` |
+| Upscaler | Real-ESRGAN compiled to **CoreML** running on the **ANE** (~6× faster than PyTorch/MPS) |
+| Library store | Nextcloud user **HomeMedia** → `Videos/Movies/` and `Videos/TV_Shows/` on CephFS |
+| Player | Jellyfin on a **4× Raspberry Pi 5 (k3s)** cluster — **no hardware encoder, never transcodes** |
+| Clients | Apple TV, iPhone, iPad only — **no DTS decode**, so everything must **direct-play** |
 
-Because the Pi 5 cluster cannot transcode, every file we store must **direct-play** on Apple
-devices. That drives every encoding decision below.
+Because the Pi 5 cluster can't transcode, every watchable file must direct-play on Apple devices.
+That single constraint drives every encoding decision below.
 
-## Naming schema (reverse-engineered from the existing library)
+## Two-tier output: lossless master + Apple rendition
+
+Every movie gets **two files in the same folder**, matching the library's existing pattern:
+
+1. **Master** — a lossless, untouched stream-copy of the disc (`.mkv`). All audio tracks in their
+   original codec (DTS/TrueHD included), original bitmap subtitles, nothing re-encoded. This is the
+   *rip-once* keeper: the physical disc is never needed again, and better renditions can be
+   re-derived from it as upscalers improve.
+2. **Rendition** — the watchable copy, generated when the source needs it:
+
+   | Master | Rendition |
+   |---|---|
+   | **DVD / MPEG-2 (≤576p)** | **AI upscale → 1080p H.264** `.mp4` + OCR'd English `.srt` |
+   | H.264 / HEVC 1080p or 4K | none — the master already direct-plays |
+
+   HD/4K sources are **not upscaled** — they're already full resolution (and the CoreML model is
+   480p-native, so running HD through it would downscale-then-upscale and *hurt* quality). They
+   ship as the ripped master, which is all they need.
+
+### Naming schema (reverse-engineered from the existing library)
 
 ```
 Movies/{Title} ({Year})/{Title} ({Year}) - {resTag} {codecTag}.{ext}
-  e.g.  Movies/The Santa Clause 2 (2002)/The Santa Clause 2 (2002) - 1080p AVC.mkv
+  e.g.  Armageddon (1998)/Armageddon (1998) - 480p MPEG.mkv     ← master
+        Armageddon (1998)/Armageddon (1998) - 1080p AVC.mp4     ← rendition
+        Armageddon (1998)/Armageddon (1998) - 1080p AVC.eng.srt ← OCR'd subtitles
 ```
-- `resTag`   → `480p` | `720p` | `1080p` | `2160p`
-- `codecTag` → `AVC` (H.264) · `HEVC` (H.265) · `MPEG` (MPEG-2 remux) · `Microsoft` (VC-1 remux)
+`resTag` → `480p`/`720p`/`1080p`/`2160p` · `codecTag` → `AVC`/`HEVC`/`MPEG`/`Microsoft` (VC-1).
 
-## Output strategy: lossless master + conditional direct-play rendition
+## The upscale (DVD → 1080p)
 
-We keep what your library already does, made automatic and consistent:
+A single streaming pass, no PNG round-trip, one model load. Per frame:
 
-1. **Archival master** — the lossless disc remux (video untouched from disc, all audio tracks,
-   HDR/10-bit preserved). This is the "rip once, never touch the disc again" keeper, and it lets
-   us re-derive better versions later as upscalers improve. `.mkv`.
-2. **Direct-play rendition — generated only when the master's codec isn't Apple-native:**
+1. **Cadence** — `idet` + duplicate-frame detection classifies the source; film DVDs get
+   inverse-telecined (3:2 pulldown → decimate to 23.976) so we upscale real frames, not dupes.
+2. **Auto-crop** — `cropdetect` finds the active picture inside baked-in black bars (4:3 letterbox
+   / windowbox) so the *real* image is upscaled and fills the TV. A 2.35 movie on a 4:3 DVD comes
+   out `1920×828`, not windowboxed. (~40% of ANE cycles saved by not upscaling bars.)
+3. **Denoise** — light `hqdn3d` only; heavy denoise + the upscaler both flatten grain/texture.
+4. **Real-ESRGAN on the ANE** — `realesr-general-x4v3` (live-action) / `realesr-animevideov3`
+   (animation, by TMDb genre), 4× then downscaled to the target.
+5. **Detail-transfer** — re-injects the source's high-frequency luma texture (grain, weave,
+   pavement) that the model smooths away.
 
-   | Master video codec | Direct-play rendition |
-   |---|---|
-   | MPEG-2 (DVD)       | **AI upscale → 1080p, HEVC** (this becomes the watchable copy) |
-   | VC-1 ("Microsoft") | HEVC 1080p |
-   | H.264 (AVC)        | none — already direct-plays |
-   | HEVC               | none — already direct-plays |
-
-   Rendition codec is **HEVC** (all-Apple clients; ~40 % smaller than H.264, keeps HDR).
-   Every rendition is guaranteed an **AAC stereo + AC3/E-AC3 5.1** pair so Apple never has to
-   transcode audio (Apple devices can't decode DTS).
-
-## Upscaling (pluggable)
-
-Upscaling is a per-source **configuration choice**, never a quality judgment made by the tool.
-The enhancer is a swappable engine:
-
-| engine key           | what it is | notes |
-|----------------------|------------|-------|
-| `topaz-tvai`         | Topaz Video AI 3+ CLI (`ffmpeg -vf tvai_up`) | best for live-action; needs current license + macOS support |
-| `topaz-veai-handoff` | Topaz Video Enhance AI 2.6.4 via watch-folder | free (you own it); one manual GUI batch per DVD |
-| `realesrgan`         | Real-ESRGAN (`realesr-animevideov3` / `x4plus`) | free, M1 GPU, great on animation |
-| `anime4k`            | Anime4K GPU shader | free, real-time, animation only |
-| `nnedi`              | ffmpeg nnedi3 edge-directed 2× | free, light, no models |
-| `none`               | no upscale (Lanczos resize only if needed) | |
-
-The pipeline **auto-selects** an engine from the movie's TMDb genre (Animation vs live-action)
-unless you pin one per title. Deinterlacing (QTGMC/bwdif) always runs first on interlaced DVDs —
-that, not resolution, is where most DVD quality comes from.
-
-## Pipeline stages
-
-```
-watch → identify → library-check → rip → enhance → encode → name → deliver → refresh
-```
-1. **watch** — detect a disc in the drive (poll `drutil`/`diskutil`).
-2. **identify** — read the volume label + `makemkvcon` title scan; match against TMDb → `Title (Year)`.
-3. **library-check** — already in `Movies/Title (Year)/`? If yes, eject and stop.
-4. **rip** — `makemkvcon` the main title(s) to a temp `.mkv` (see title selection).
-5. **enhance** — optional AI upscale + deinterlace per config.
-6. **encode** — build master + conditional direct-play HEVC rendition; fix audio tracks.
-7. **name** — apply the schema.
-8. **deliver** — push into Nextcloud (via `kubectl`) and index it.
-9. **refresh** — trigger a Jellyfin library scan.
-
-Ambiguous discs (see below) drop into a **review queue** instead of guessing.
+**Audio (rendition):** every source track kept — Apple-native codecs (AC3/AAC/E-AC3) copied as-is,
+DTS/TrueHD transcoded to AC3 5.1, plus one AAC stereo default. The *original* DTS stays in the
+master. **Subtitles:** English only; an existing text track is used directly, otherwise the DVD's
+bitmap VobSub is OCR'd to a sidecar `.srt` with tesseract (~98% accurate, ~90 s/movie) so subtitles
+survive in the direct-play `.mp4`.
 
 ## Title selection — the "black art"
 
-Commercial discs expose many titles; the feature is usually the longest, but Blu-rays use
-*playlist obfuscation* (dozens of near-duplicate/decoy playlists) and some discs are episodic.
-Heuristic:
-- Ignore titles shorter than `disc.min_title_seconds` (default 300 s).
-- Pick the longest remaining title.
-- If the 2nd-longest is ≥ `disc.ambiguous_ratio` (default 0.90) of the longest, or several titles
-  share a near-identical duration, mark the disc **ambiguous** → review queue (no guess).
+Commercial discs expose many titles; picking wrong wastes hours. The heuristic, strongest signal
+first:
 
-## Usage
+- **TMDb runtime match** — pick the title whose duration is closest to the movie's known runtime.
+  This cuts straight through decoy playlists and episodic discs.
+- **Duplicate collapse** — identical duration + chapter count (sizes within 5%) = the same feature
+  listed twice; collapse instead of flagging ambiguous.
+- **Ambiguity guard** — otherwise, if several titles are near-equal length, the disc goes to a
+  **review queue** rather than guessing.
+
+DVD volume labels are often unusable (`ARMAGEDN`, `COURAGEUNDERFIREDTSVER3`). When auto-identify
+can't recover one, pass `--name "Armageddon" --year 1998` and the runtime match handles the rest.
+
+## Commands
 
 ```bash
-rip-movie config-check                      # validate config, tools, cluster reachability
-rip-movie search wall-e                     # do I already own this? (by title, no disc)
-rip-movie identify                          # scan the current disc, print the TMDb match + library status
-rip-movie enhance FILE --title "…"          # AI-upscale a file to 1080p (denoise→engine→detail-transfer)
-rip-movie push FILE --title "…"             # name to schema + deliver to Nextcloud + refresh Jellyfin
-rip-movie run FILE --title "…" [--dry-run]  # a finished file: enhance → name → deliver → force-identify
-rip-movie rip [--title N]                    # rip the disc in the drive to an mkv (auto-selects main title)
-rip-movie disc [--title N] [--dry-run]       # a disc, end-to-end: identify → rip → upscale → deliver
-rip-movie watch                              # daemon: wait for discs and process each automatically
-rip-movie review                             # list/resolve ambiguous discs (playlist obfuscation / episodic)
+rip-movie config-check                  # validate config, tools, cluster reachability
+rip-movie dashboard                     # live pipeline dashboard (kanban) at http://localhost:8787
+rip-movie search wall-e                 # is it in the library? (movies + TV, no disc needed)
+
+rip-movie watch                         # daemon: rip each inserted disc → deliver master → queue → eject
+rip-movie disc [--name … --year …]      # process the disc in the drive once (identify → rip → master → queue)
+rip-movie upscale-worker                # daemon: drain the upscale queue, one 1080p rendition at a time
+rip-movie queue                         # list pending / failed upscale jobs
+rip-movie status                        # drive, running rip/upscale, queue depth
+
+rip-movie rip [--title N]               # just rip the disc to an mkv (auto-selects the main title)
+rip-movie run FILE --title "…"          # a ripped file, end-to-end: master + rendition, inline
+rip-movie push FILE --title "…"         # name to schema + deliver to Nextcloud + refresh Jellyfin
+rip-movie review                        # resolve ambiguous discs queued for a manual title pick
 ```
 
-Two entry points: **`run FILE`** starts from an already-ripped file; **`disc` / `watch`** start from a
-physical disc (scan → TMDb identify → skip if already owned → MakeMKV rip → the same `run` back half).
-Ambiguous discs go to the review queue instead of guessing the wrong title.
+The **walk-away setup** is two daemons: `watch` rips discs and queues their upscales; `upscale-worker`
+drains the queue. Watch the whole thing on the **dashboard** — one swimlane per movie showing its
+progress through Rip → Master → Nextcloud → Upscale → Cleanup → In Jellyfin, plus a library search
+bar and cluster health.
 
-The AI upscale is a single ANE-streaming pass (~8–11 h/movie, overnight). `run FILE --title "WALL·E"`
-upscales a ripped DVD and lands it in Jellyfin as `WALL·E (2008) - 1080p AVC.mp4`, pinned to the
-right TMDb id so Jellyfin can't mis-match it.
+## Delivery & cleanup
 
-`search` and the disc `identify` share one library check, so "did I already rip this?" gives the
-same answer whether you type the title or drop the disc in. Both also flag when a title is present
-but only in a low-res or non-direct-play form (e.g. WALL·E at 480p MPEG-2) — a candidate for a
-better rip/upscale.
+Files stream into the Nextcloud pod over `kubectl` to a `.part` and atomically rename (a partial
+transfer never gets indexed), get `chown`'d to the web user, then `occ files:scan` registers just
+that folder and Jellyfin is refreshed + force-identified to the right TMDb id. Local temporaries are
+removed **only after** delivery is confirmed — the rip only once both tiers are in the library — so
+a failed run can always be retried.
 
 ## Configuration
 
-Copy `config/rip-movie.example.yaml` to `config/rip-movie.yaml` and fill in secrets (TMDb key,
-Nextcloud/Jellyfin access). See that file for every knob.
+Everything lives in `config/rip-movie.toml`; secrets (TMDb key, Jellyfin API key) come from
+`config/secrets.env` (gitignored) via `${ENV_VAR}` expansion. Key knobs: `upscale.mode`
+(`queue`/`inline`), `upscale.dvd.autocrop`, `upscale.dvd.sd_max_height`, `encode.audio.languages`,
+`encode.subtitles.languages`, `deliver.keep_source_master`.
 
 ## Status
 
-**Full pipeline built, disc-to-Jellyfin.** Implemented + tested: config/`config-check`; `search`
-(title → library, quality flags, TMDb enrichment) with a robust TMDb matcher (spelling variants +
-similarity — handles WALL·E); disc scan + title-selection heuristic + `identify`; **`enhance`** —
-cadence classifier (idet + inverse-telecine) → light denoise → CoreML/ANE upscale (animevideov3 /
-general-x4v3) → detail-transfer → aspect-correct 1080p, **streaming** (no PNG round-trip), ~8–11 h/movie;
-**`push`**/`deliver` (schema-name → Nextcloud via kubectl → `occ files:scan` → Jellyfin refresh +
-TMDb force-identify); **`rip`** (MakeMKV); **`run`** (file→library) and **`disc`**/**`watch`**
-(disc→library) orchestration + review queue.
-
-Remaining polish: `status`, optional HEVC master encode, hard-telecine tuning.
+Full pipeline, disc-to-Jellyfin, validated on real discs (Armageddon, Courage Under Fire):
+title selection (runtime + dup-collapse + `--name` recovery), MakeMKV rip with per-phase progress,
+two-tier delivery to the correct Nextcloud path + Jellyfin index (verified live), ANE-streaming
+upscale with auto-crop + IVTC + detail-transfer, VobSub→SRT OCR, the decoupled upscale queue +
+worker, and the live swimlane dashboard with library search.
