@@ -84,15 +84,15 @@ scale          = 3                  # realesrgan scale for animevideov3 (4x-only
 deinterlace    = "auto"             # auto (detect) | yes | no
 ivtc           = "off"             # inverse-telecine: auto|on|off. 29.97 NTSC film DVDs carry ~20%
                                     # duplicate frames (3:2 pulldown); decimate to 23.976 = faster + native cadence
-denoise         = "hqdn3d=2:1:2:2"  # LIGHT pre-clean only — keep texture; heavy denoise + the AI model
+denoise         = ""  # LIGHT pre-clean only — keep texture; heavy denoise + the AI model
                                     # both flatten weave/grain/pavement. Detail-transfer restores what's lost.
-detail_transfer = 0.8               # 0=off. Blend high-freq luma texture from the source back onto the AI
+detail_transfer = 1.5               # 0=off. Blend high-freq luma texture from the source back onto the AI
                                     # result (grain-extract/merge). Fixes the "smooth tweed/plastic" over-smoothing.
 chunk_seconds  = 30                 # process the movie in chunks so frame PNGs don't fill the disk
 
 [upscale.dvd.engines]               # validated 2026-08-17 via WALL·E + Charlie Wilson A/B
 animation   = "realesr-animevideov3"   # ncnn, fast (~11h/movie), crisp on cartoons
-live_action = "realesr-general-x4v3"   # run as CoreML/ANE (.mlpackage) — natural+sharp on faces,
+live_action = "realesr-general-wdn-x4v3"   # run as CoreML/ANE (.mlpackage) — natural+sharp on faces,
                                        # ~10-12h/movie (was ~46h on PyTorch/MPS; ANE+streaming got it there).
 # Heavy ncnn 4x models (remacri-4x/ultrasharp-4x/realesrgan-x4plus) look great on stills but are
 # impractically slow for video (>4s/frame = weeks/movie). animevideov3 on live-action = waxy faces.

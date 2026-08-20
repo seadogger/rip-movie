@@ -36,8 +36,9 @@ def _inline_comments(text: str) -> dict:
     comments, section = {}, ""
     for line in text.splitlines():
         s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            section = s[1:-1].strip()
+        _sec_m = re.match(r"\[([^\]]+)\]", s)
+        if _sec_m:
+            section = _sec_m.group(1).strip()
             continue
         m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$", line)
         if not m:
@@ -152,8 +153,9 @@ def set_value(cfg_path: str | Path, dotted: str, new_value) -> None:
     cur_section, done = "", False
     for i, line in enumerate(lines):
         s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            cur_section = s[1:-1].strip()
+        _sec_m = re.match(r"\[([^\]]+)\]", s)
+        if _sec_m:
+            cur_section = _sec_m.group(1).strip()
             continue
         if cur_section != section:
             continue
