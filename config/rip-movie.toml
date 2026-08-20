@@ -82,7 +82,7 @@ autocrop       = "auto"             # auto|off. Detect + strip baked-in black ba
 engine         = "auto"             # auto = pick model by TMDb genre (below); or pin a model name
 scale          = 3                  # realesrgan scale for animevideov3 (4x-only models ignore this)
 deinterlace    = "auto"             # auto (detect) | yes | no
-ivtc           = "auto"             # inverse-telecine: auto|on|off. 29.97 NTSC film DVDs carry ~20%
+ivtc           = "off"             # inverse-telecine: auto|on|off. 29.97 NTSC film DVDs carry ~20%
                                     # duplicate frames (3:2 pulldown); decimate to 23.976 = faster + native cadence
 denoise         = "hqdn3d=2:1:2:2"  # LIGHT pre-clean only — keep texture; heavy denoise + the AI model
                                     # both flatten weave/grain/pavement. Detail-transfer restores what's lost.

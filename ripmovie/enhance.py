@@ -164,12 +164,14 @@ def detect_cadence(cfg: Config, path: str, src_fps: float) -> tuple[str, str, st
     film_rate = src_fps > 28.0 and 0 < eff < 27.0        # ~1-in-5 dups => 24fps film in a 30fps stream
     st = _idet_stats(cfg, path)
     combed = st["interlaced"] / max(1, st["total"]) > 0.20
-    if combed and film_rate:
-        return "hard-telecine", "fieldmatch,decimate,", "24000/1001"   # rebuild fields, then 24fps
+    if film_rate:
+        # Telecined film -> PROPER field-matched inverse-telecine, not a blind 1-in-5 drop. fieldmatch
+        # reconstructs the original 24 film frames (so the kept frames are the real cadence) and its
+        # decimate companion removes the redundant one. Blind `decimate` drops by position and judders
+        # on fast pans when the pulldown dups aren't exact.
+        return "telecine", "fieldmatch,decimate,", "24000/1001"
     if combed:
         return "interlaced", "bwdif,", None                            # true 29.97i video
-    if film_rate:
-        return "progressive-telecine", "decimate,", "24000/1001"       # remove 3:2 dups -> 24fps
     return "progressive", "", None                                     # clean (native 24/25 or 30): keep
 
 
@@ -295,9 +297,12 @@ def enhance(cfg: Config, input_path: str, output_path: str, is_animation: bool,
             cad_fps = "24000/1001"
     if cad_fps:
         fps = cad_fps
-    vf_pre = cad_vf + crop_vf + denoise
-    if crop_vf:                                    # crop changed the size -> scale back to model input
-        vf_pre += f",scale={info['width']}:{info['height']}"
+    # Assemble the pre-filter from non-empty parts (any of cadence/crop/denoise may be off) so we
+    # never emit a stray/double comma. Crop changes the size -> scale back to the model's input.
+    parts = [p for p in (cad_vf.strip(","), crop_vf.strip(","), denoise.strip(",")) if p]
+    if crop_vf:
+        parts.append(f"scale={info['width']}:{info['height']}")
+    vf_pre = ",".join(parts)
 
     # CoreML path: stream the whole segment through pipes (no PNG round-trip, no chunking).
     if use_coreml and cfg.get("paths.enhance_stream"):
