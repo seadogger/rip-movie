@@ -145,6 +145,35 @@ def _cluster(cfg: Config) -> dict:
     return out
 
 
+def _recent_pushes(cfg: Config) -> list[dict]:
+    """The most-recently-delivered files in the library (a file's mtime = when it was pushed)."""
+    from . import kube
+    k = cfg.get("deliver.kubectl", {})
+    ctx = k.get("context")
+    try:
+        ns = k.get("nextcloud_namespace")
+        pod = kube.pod_name(ns, k.get("nextcloud_pod_selector"), context=ctx)
+        dp = cfg.require("deliver.kubectl.data_path").rstrip("/")
+        mv = cfg.get("library.movies_subpath", "Videos/Movies").strip("/")
+        sh = cfg.get("library.shows_subpath", "Videos/TV_Shows").strip("/")
+        cmd = (f'find "{dp}/{mv}" "{dp}/{sh}" -maxdepth 3 -type f '
+               r'\( -name "*.mkv" -o -name "*.mp4" -o -name "*.srt" \) '
+               r'-printf "%T@\t%f\n" 2>/dev/null | sort -rn | head -12')
+        out = kube.exec_in(ns, pod, ["sh", "-c", cmd], container=k.get("nextcloud_container"),
+                           context=ctx, timeout=25)
+        pushes = []
+        for line in out.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                try:
+                    pushes.append({"file": parts[1], "ts": float(parts[0])})
+                except ValueError:
+                    pass
+        return pushes
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def gather(cfg: Config) -> dict:
     st: dict = {"now": time.time()}
     st["drive"] = _cached("drive", 8, lambda: _drive(cfg))
@@ -189,6 +218,7 @@ def gather(cfg: Config) -> dict:
     st["done"] = status.recent(cfg, 10)
     st["cleaned"] = status.recent_events(cfg, "cleaned", 8)
     st["cluster"] = _cached("cluster", 30, lambda: _cluster(cfg))
+    st["pushes"] = _cached("pushes", 30, lambda: _recent_pushes(cfg))
     st["lanes"] = _build_lanes(st)
     return st
 
@@ -301,6 +331,14 @@ header{display:flex;align-items:center;gap:12px;margin-bottom:16px}
 .step.skipped::before,.step.pending::before{background:var(--line)}
 @keyframes pl2{0%{box-shadow:0 0 0 0 rgba(88,166,255,.35)}70%{box-shadow:0 0 0 6px rgba(88,166,255,0)}100%{box-shadow:0 0 0 0 rgba(88,166,255,0)}}
 .empty{color:var(--faint);font-size:13px;font-style:italic;padding:26px 3px;text-align:center}
+/* recent push history */
+.pushes{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 15px 14px}
+.pushes h3{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.pushes .p{display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+.pushes .p:last-child{border:0}
+.pushes .p .ic{font-size:12px;width:16px;text-align:center;flex:none}
+.pushes .p .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pushes .p .ago{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint);flex:none}
 .dot{width:8px;height:8px;border-radius:50%;flex:none}
 .dot.g{background:var(--ok);box-shadow:0 0 6px rgba(63,185,80,.5)}.dot.r{background:var(--bad)}
 footer{margin-top:22px;color:var(--faint);font-family:var(--mono);font-size:11px;display:flex;gap:8px;flex-wrap:wrap}
@@ -315,6 +353,7 @@ footer .k{color:var(--dim)}
  <input id=q type=search autocomplete=off spellcheck=false placeholder="Search your library — movies &amp; TV shows…">
  <div class=results id=results></div></div>
 <div class=board id=board></div>
+<div class=pushes id=pushes></div>
 <footer><span class=k>source</span> MakeMKV<span class=k>· upscale</span> Real-ESRGAN on CoreML/ANE
 <span class=k>· deliver</span> Nextcloud → Jellyfin</footer></div>
 <script>
@@ -358,8 +397,17 @@ function render(s){
   +(s.drive&&s.drive.present?chip("Disc",true,"inserted"):"");
  const b=document.getElementById("board");b.innerHTML="";
  const lanes=s.lanes||[];
- if(!lanes.length){b.append(E("div","empty","Pipeline idle — insert a disc, or a finished title will appear here."));return;}
- lanes.forEach(L=>b.append(lane(L)));
+ if(!lanes.length)b.append(E("div","empty","Pipeline idle — insert a disc, or a finished title will appear here."));
+ else lanes.forEach(L=>b.append(lane(L)));
+ // recent push history (newest delivery first)
+ const P=document.getElementById("pushes"),ps=s.pushes||[];
+ if(!ps.length){P.innerHTML="";}
+ else{
+  const ago=t=>{const d=(Date.now()/1000-t)|0;return d<60?d+"s ago":d<3600?(d/60|0)+"m ago":d<86400?(d/3600|0)+"h ago":(d/86400|0)+"d ago"};
+  const ic=f=>/\.srt$/i.test(f)?"💬":/\.mp4$/i.test(f)?"🎞️":"💿";
+  P.innerHTML="<h3><span>📤</span>Recent pushes → Jellyfin</h3>"+
+   ps.map(p=>`<div class=p><span class=ic>${ic(p.file)}</span><span class=nm>${esc(p.file)}</span><span class=ago>${ago(p.ts)}</span></div>`).join("");
+ }
 }
 // search
 const R=document.getElementById("results"),Q=document.getElementById("q");let tmr;
