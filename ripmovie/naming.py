@@ -54,8 +54,12 @@ def probe(cfg: Config, path: str) -> dict:
     }
 
 
-def res_tag(height: int) -> str:
-    h = min(_STD_HEIGHTS, key=lambda s: abs(s - height))
+def res_tag(height: int, width: int = 0) -> str:
+    """Resolution tag by the standard height. Scope/widescreen content is only ~820px tall at 1920
+    wide, so classify by the LARGER of the actual height and the 16:9-equivalent height implied by
+    the width (1920 -> 1080p) — otherwise a 1920x828 rendition would mislabel as 720p."""
+    logical = max(height, round(width * 9 / 16)) if width else height
+    h = min(_STD_HEIGHTS, key=lambda s: abs(s - logical))
     return f"{h}p"
 
 
@@ -73,7 +77,7 @@ def container_ext(format_name: str, source_path: str) -> str:
 def target(cfg: Config, local_path: str, title: str, year) -> dict:
     """Return the schema folder/filename/relative-path for a source file."""
     info = probe(cfg, local_path)
-    restag = res_tag(info["height"])
+    restag = res_tag(info["height"], info["width"])
     codectag = codec_tag(info["codec"])
     ext = container_ext(info["format_name"], local_path)
     folder = f"{title} ({year})" if year else title

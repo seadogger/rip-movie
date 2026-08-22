@@ -130,6 +130,53 @@ def list_movie_tree(cfg: Config) -> dict[str, list[MovieFile]]:
     return tree
 
 
+def _height(res: str) -> int:
+    return int(res[:-1]) if res[:-1].isdigit() else 0
+
+
+@dataclass
+class UpscaleCandidate:
+    folder: str
+    title: str
+    year: str
+    best_height: int
+    source_file: str        # the SD master to upscale (filename inside the folder)
+    source_codec: str
+    size_gib: float
+    status: str             # "candidate" (SD, no HD copy) | "done" (already has 1080p+) | "hd"
+
+
+def upscale_candidates(cfg: Config, tree: dict[str, list[MovieFile]] | None = None
+                       ) -> list[UpscaleCandidate]:
+    """Classify every library movie for the upscale viewer. A folder is a candidate when it has an
+    SD (<=576p) file and does NOT already carry a >=1080p direct-play rendition; the largest SD file
+    is the master we'd re-upscale. Candidates sort first."""
+    if tree is None:
+        tree = list_movie_tree(cfg)
+    sd_max = int(cfg.get("upscale.dvd.sd_max_height", 576))
+    out: list[UpscaleCandidate] = []
+    for folder, files in tree.items():
+        if not files:
+            continue
+        title, year = _strip_year(folder)
+        best = max((_height(f.res) for f in files), default=0)
+        sd = [f for f in files if 0 < _height(f.res) <= sd_max]
+        hd_dp = [f for f in files if _height(f.res) >= 1080 and f.codec in DIRECTPLAY_CODECS]
+        if sd and not hd_dp:
+            status, src = "candidate", max(sd, key=lambda f: f.size_bytes)
+        elif sd and hd_dp:
+            status, src = "done", None
+        else:
+            status, src = "hd", None
+        out.append(UpscaleCandidate(
+            folder, title, year, best,
+            src.name if src else "", src.codec if src else "",
+            round(src.size_gib if src else max((f.size_gib for f in files), default=0.0), 1),
+            status))
+    out.sort(key=lambda c: (c.status != "candidate", c.title.lower()))
+    return out
+
+
 def search(cfg: Config, query: str, tree: dict[str, list[MovieFile]] | None = None) -> list[SearchResult]:
     if tree is None:
         tree = list_movie_tree(cfg)

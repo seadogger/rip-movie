@@ -184,7 +184,13 @@ def detect_crop(cfg: Config, path: str, w: int, h: int) -> Optional[tuple[int, i
     """
     ff = cfg.get("paths.ffmpeg", "ffmpeg")
     counts: dict[tuple[int, int, int, int], int] = {}
-    for ss in (120, 600, 1500, 3000, 5000):
+    # Sample points must fall INSIDE the clip: the fixed 120..5000s spots miss entirely on a short
+    # clip (e.g. a 60s sample), so fall back to points spread across whatever duration we have.
+    dur = _duration(cfg, path)
+    points = [t for t in (120, 600, 1500, 3000, 5000) if dur <= 0 or t < dur - 5]
+    if not points:
+        points = [round(dur * f) for f in (0.15, 0.4, 0.65, 0.85)] if dur > 0 else [1]
+    for ss in points:
         try:
             out = subprocess.run(
                 [ff, "-hide_banner", "-ss", str(ss), "-i", path, "-vf", "cropdetect=24:2:0",

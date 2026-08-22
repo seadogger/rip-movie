@@ -73,6 +73,30 @@ def exec_stdin_file(namespace: str, pod: str, argv: list[str], local_path: str,
     return proc.stdout.decode("utf-8", "replace")
 
 
+def exec_stdout_file(namespace: str, pod: str, argv: list[str], local_path: str,
+                     container: Optional[str] = None, context: Optional[str] = None,
+                     timeout: int = 14400) -> str:
+    """Run a pod command and stream its stdout straight to a local file (no full-file buffering).
+    Used to pull a library master back out of Nextcloud for re-upscaling (`cat <path>`)."""
+    cmd = ["kubectl"]
+    if context:
+        cmd += ["--context", context]
+    cmd += ["-n", namespace, "exec", pod]
+    if container:
+        cmd += ["-c", container]
+    cmd += ["--", *argv]
+    try:
+        with open(local_path, "wb") as fh:
+            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE, timeout=timeout)
+    except FileNotFoundError as e:
+        raise KubeError("kubectl not found on PATH") from e
+    except subprocess.TimeoutExpired as e:
+        raise KubeError(f"pull from pod timed out after {timeout}s") from e
+    if proc.returncode != 0:
+        raise KubeError(proc.stderr.decode("utf-8", "replace").strip() or "pull from pod failed")
+    return local_path
+
+
 def reachable(context: Optional[str] = None) -> bool:
     try:
         argv = ["kubectl"]

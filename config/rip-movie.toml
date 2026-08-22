@@ -68,6 +68,13 @@ mode = "queue"                      # queue = rip fast + enqueue the ~10h upscal
                                     # appears in Jellyfin at DVD quality immediately, the 1080p
                                     # rendition lands when the worker gets to it.
                                     # inline = upscale in the same disc run (blocks ~10h per disc).
+engine = "topaz-veai-handoff"       # which upscaler the worker drives:
+                                    #   realesrgan        = Real-ESRGAN on the ANE, fully automated
+                                    #   topaz-veai-handoff = prep clips for Video Enhance AI 2.6.4
+                                    #     (GUI-only, watermark-free on an owned license). The worker
+                                    #     drops prepped clips in the inbox; you batch them through
+                                    #     the VEAI GUI once; the pipeline auto-finishes each as its
+                                    #     output lands. See [upscale.topaz_handoff].
 
 # engine: topaz-tvai | topaz-veai-handoff | realesrgan | anime4k | nnedi | none | auto
 [upscale.dvd]
@@ -100,6 +107,27 @@ live_action = "realesr-general-wdn-x4v3"   # run as CoreML/ANE (.mlpackage) — 
 [upscale.dvd.topaz_tvai]
 model = "prob-3"                    # Proteus
 app   = "/Applications/Topaz Video AI.app"   # set once installed
+
+# GUI handoff to Video Enhance AI 2.6.4 (used when [upscale] engine = "topaz-veai-handoff").
+# The worker preps video-only clips into `inbox`; you run them through the VEAI GUI (Artemis LQ,
+# frame-interpolation OFF) with its output folder set to `outbox`; the pipeline picks up each
+# finished clip, muxes the master's audio + OCR'd subs, delivers it, and cleans up.
+[upscale.topaz_handoff]
+inbox          = "~/rip-movie/topaz/inbox"    # prepped clips land here — drag these into VEAI
+outbox         = "~/rip-movie/topaz/outbox"   # set VEAI's output folder to this; finished clips are picked up
+settle_seconds = 20                           # treat an outbox file as done once its size is stable this long
+intermediate   = "prores"                     # prores (best; larger) | h264 (smaller). Video-only, fed to VEAI
+output_fps     = "source"                      # rendition cadence: source = the film's true rate snapped
+                                               # clean (23.976 stays 23.976); "30" bakes 29.97 for smoother
+                                               # 24p-on-60Hz playback if your Apple TV isn't set to
+                                               # "Match Content Frame Rate". Either way the rate is EXACT
+                                               # CFR so audio can't drift.
+# Which VEAI preset to run, by TMDb genre, stamped into each clip's filename as a [tag] so a mixed
+# batch is unambiguous. Proteus (Fine Tune) is the best model for BOTH live action and animation;
+# the ONLY difference is Grain — ON for live action (fights the plastic look), OFF for animation
+# (cel/CGI is inherently clean, grain looks wrong). Save two Proteus presets in VEAI accordingly.
+model_live_action = "Proteus"
+model_animation   = "Proteus no-grain"
 
 [upscale.bluray_1080p]
 enabled = false                     # 1080p stays 1080p

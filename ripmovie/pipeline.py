@@ -73,7 +73,6 @@ def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_an
     """AI-upscaled H.264 + Apple-native audio (DTS/TrueHD -> AC3, +AAC stereo) -> .mp4, plus an
     OCR'd English .srt sidecar. Cleans its own temps once the rendition is confirmed delivered."""
     from .enhance import enhance
-    from .finalize import mux_rendition, make_subtitle_sidecar
 
     work = cfg.path_for("paths.work_dir")
     work.mkdir(parents=True, exist_ok=True)
@@ -86,14 +85,30 @@ def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_an
     progf.parent.mkdir(parents=True, exist_ok=True)
     _remove(progf)                                       # clear any stale progress from a prior run
 
+    status.write(cfg, "upscaling", title=title, year=year, stage="enhancing",
+                 started=started, output=str(final), progress_file=str(progf))
+    progress("[rendition] enhancing (AI upscale — the slow stage) ...")
+    enhance(cfg, source, str(video), is_anim, sample_seconds=sample, mux_audio=False,
+            progress_file=str(progf), progress=lambda s: progress("  " + s))
+    return _finalize_rendition(cfg, source, str(video), str(final), str(srt), title, year, tmdb_id,
+                               started=started, progf=progf, dry_run=dry_run, keep=keep,
+                               progress=progress)
+
+
+def _finalize_rendition(cfg: Config, source: str, video: str, final: str, srt: str,
+                        title: str, year, tmdb_id, *, started: float, progf, dry_run: bool,
+                        keep: bool, extra_cleanup: tuple = (),
+                        progress: Callable[[str], None] = print) -> dict:
+    """Shared tail for every rendition engine: given an already-upscaled `video` (final geometry,
+    H.264, no audio), mux Apple-native audio + OCR'd English subs, deliver both, then clean the
+    temps ONLY once the rendition is confirmed in the library. `extra_cleanup` are engine-specific
+    artifacts (e.g. the Topaz intermediate + output) removed alongside the normal temps on success."""
+    from .finalize import mux_rendition, make_subtitle_sidecar
+
     def _stage(s):
         status.write(cfg, "upscaling", title=title, year=year, stage=s,
                      started=started, output=str(final), progress_file=str(progf))
 
-    _stage("enhancing")
-    progress("[rendition] enhancing (AI upscale — the slow stage) ...")
-    enhance(cfg, source, str(video), is_anim, sample_seconds=sample, mux_audio=False,
-            progress_file=str(progf), progress=lambda s: progress("  " + s))
     _stage("muxing audio")
     progress("[rendition] muxing Apple-native audio -> .mp4 ...")
     mux_rendition(cfg, str(video), source, str(final), progress=lambda s: progress("  " + s))
@@ -117,12 +132,12 @@ def deliver_rendition(cfg: Config, source: str, title: str, year, tmdb_id, is_an
         pass
     elif delivered:
         _stage("cleanup")
-        n = _remove(video, final, srt, progf)
-        progress(f"[cleanup] removed {n} rendition temp file(s) from {work}")
+        n = _remove(video, final, srt, progf, *extra_cleanup)
+        progress(f"[cleanup] removed {n} rendition temp file(s)")
         status.log_event(cfg, "cleaned", title=title, year=year,
                          detail=f"{n} rendition temp file(s)")
     else:
-        progress(f"[cleanup] rendition NOT delivered — keeping local files in {work} for retry")
+        progress("[cleanup] rendition NOT delivered — keeping local files for retry")
     status.clear(cfg, "upscaling")
     if delivered:
         status.complete(cfg, title=title, year=year, kind="rendition")
@@ -318,6 +333,71 @@ def enqueue_upscale(cfg: Config, source: str, title: str, year, tmdb_id, is_anim
     return fn
 
 
+def enqueue_existing(cfg: Config, folder: str, source_file: str, title: str, year, tmdb_id,
+                     is_anim: bool) -> Path:
+    """Queue an upscale for a movie already in the library. The master lives in Nextcloud, so the
+    job records its pod path (`source_remote`); the worker pulls it local (`source`) at process time
+    so a big queue doesn't fetch everything up front."""
+    from .library import movies_dir
+    remote = f"{movies_dir(cfg)}/{folder}/{source_file}"
+    local = str(cfg.path_for("paths.work_dir") / "rips" / source_file)
+    job = {"source": local, "source_remote": remote, "title": title, "year": year,
+           "tmdb_id": tmdb_id, "is_anim": bool(is_anim), "from_library": folder}
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", f"{title}_{year or ''}").strip("_")[:60] or "job"
+    fn = _upscale_dir(cfg) / f"{slug}.json"
+    fn.write_text(json.dumps(job, indent=2))
+    return fn
+
+
+def queue_library_upscale(cfg: Config, folder: str) -> dict:
+    """Resolve a library folder to an upscale job: find its SD master, look up TMDb (genre -> engine
+    model + id for later Jellyfin identify), and enqueue. Returns a small status dict for the UI."""
+    from .library import upscale_candidates
+    from .identify import search_tmdb
+    cand = next((c for c in upscale_candidates(cfg) if c.folder == folder), None)
+    if not cand:
+        return {"ok": False, "error": f"not in library: {folder}"}
+    if cand.status != "candidate":
+        return {"ok": False, "error": f"{folder} is {cand.status}, not an upscale candidate"}
+    # avoid duplicates: already pending/awaiting/running for this title?
+    key = re.sub(r"[^a-z0-9]", "", cand.title.lower())
+    for j in list_upscale_jobs(cfg) + _awaiting_jobs(cfg):
+        if re.sub(r"[^a-z0-9]", "", str(j.get("title", "")).lower()) == key:
+            return {"ok": False, "error": f"{cand.title} is already queued"}
+    tmdb_id, is_anim = None, False
+    apikey = cfg.get("identify.tmdb_api_key", "")
+    if apikey:
+        m = search_tmdb(cand.title, apikey, int(cand.year) if cand.year.isdigit() else None)
+        if m:
+            tmdb_id, is_anim = m.tmdb_id, m.is_animation
+    year = int(cand.year) if cand.year.isdigit() else None
+    enqueue_existing(cfg, folder, cand.source_file, cand.title, year, tmdb_id, is_anim)
+    return {"ok": True, "title": cand.title, "year": cand.year, "is_anim": is_anim}
+
+
+def _ensure_local_source(cfg: Config, job: dict, progress: Callable[[str], None] = print) -> str:
+    """If a job's source is a library master still in Nextcloud, pull it local before processing.
+    Publishes a live 'pulling master' status so the fetch shows as an active lane on the dashboard
+    (otherwise a claimed-but-not-yet-prepping job would vanish between 'queued' and 'prepping')."""
+    src = job.get("source", "")
+    remote = job.get("source_remote")
+    if not remote or (src and Path(src).exists()):
+        return src
+    from . import kube
+    k = cfg.get("deliver.kubectl", {})
+    ns, ctx = k.get("nextcloud_namespace"), k.get("context")
+    pod = kube.pod_name(ns, k.get("nextcloud_pod_selector"), context=ctx)
+    Path(src).parent.mkdir(parents=True, exist_ok=True)
+    status.write(cfg, "upscaling", title=job.get("title"), year=job.get("year"),
+                 stage="pulling master from Nextcloud", started=time.time(), output=src)
+    progress(f"[fetch] pulling master from Nextcloud → {Path(src).name} ...")
+    kube.exec_stdout_file(ns, pod, ["cat", remote], src,
+                          container=k.get("nextcloud_container"), context=ctx)
+    gb = Path(src).stat().st_size / 1e9 if Path(src).exists() else 0
+    progress(f"[fetch] pulled {gb:.2f} GB")
+    return src
+
+
 def list_upscale_jobs(cfg: Config) -> list[dict]:
     """Pending jobs, oldest first. (.running / .failed are excluded — only *.json is pending.)"""
     out = []
@@ -328,10 +408,32 @@ def list_upscale_jobs(cfg: Config) -> list[dict]:
     return out
 
 
+def _awaiting_jobs(cfg: Config) -> list[dict]:
+    """Topaz-handoff jobs that have been prepped and are parked waiting for the VEAI GUI run.
+    (Each .awaiting file IS the manifest written by topaz.prep.)"""
+    out = []
+    for f in sorted(_upscale_dir(cfg).glob("*.awaiting"), key=lambda p: p.stat().st_mtime):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        d["_file"] = str(f)
+        out.append(d)
+    return out
+
+
 def run_upscale_worker(cfg: Config, once: bool = False, poll: int = 30,
                        progress: Callable[[str], None] = print) -> int:
     """Drain the upscale queue one job at a time. Builds + delivers each rendition, then removes
-    the local rip. A failed job is parked as <slug>.failed (never silently retried)."""
+    the local rip. A failed job is parked as <slug>.failed (never silently retried).
+
+    The engine is chosen by `upscale.engine`: the default `realesrgan` upscales inline on the ANE;
+    `topaz-veai-handoff` instead preps each job to the inbox and finishes it when the VEAI GUI run
+    lands the output (see run_topaz_handoff_worker)."""
+    engine = str(cfg.get("upscale.engine", "realesrgan")).lower()
+    if engine in ("topaz-veai-handoff", "topaz-handoff", "veai-handoff"):
+        return run_topaz_handoff_worker(cfg, once=once, poll=poll, progress=progress)
+
     import time
     progress("upscale worker started" + (" (single pass)" if once else " — draining queue (Ctrl-C to stop)"))
     while True:
@@ -351,6 +453,7 @@ def run_upscale_worker(cfg: Config, once: bool = False, poll: int = 30,
         src = job["source"]
         progress(f"[upscale] {job['title']} ({job.get('year')})  <- {Path(src).name}")
         try:
+            src = _ensure_local_source(cfg, job, progress=progress)   # pull from Nextcloud if needed
             if not Path(src).exists():
                 raise FileNotFoundError(f"source rip is gone: {src}")
             res = deliver_rendition(cfg, src, job["title"], job.get("year"), job.get("tmdb_id"),
@@ -365,3 +468,74 @@ def run_upscale_worker(cfg: Config, once: bool = False, poll: int = 30,
             progress(f"[upscale] FAILED {job['title']}: {e} (parked as {jf.with_suffix('.failed').name})")
         if once:
             return 0
+
+
+def run_topaz_handoff_worker(cfg: Config, once: bool = False, poll: int = 30,
+                             progress: Callable[[str], None] = print) -> int:
+    """VEAI 2.6.4 GUI handoff engine. Each loop does two independent things:
+
+      1. PREP any pending queue jobs (*.json) into video-only intermediates in the inbox, parking
+         each as its manifest (<slug>.awaiting). This is fast, so a stack of discs all land in the
+         inbox for you to batch through Video Enhance AI in one GUI run.
+      2. RESUME any parked job whose size-stable output has appeared in the outbox: encode -> 1080p,
+         mux the master's audio + OCR'd subs, deliver, reindex, and clean up every artifact.
+
+    A failed prep/resume is parked as <slug>.failed (never silently retried)."""
+    import time
+    from . import topaz
+
+    inbox, outbox = topaz.handoff_dirs(cfg)
+    progress(f"topaz handoff worker started — inbox={inbox}  outbox={outbox}"
+             + (" (single pass)" if once else "  (Ctrl-C to stop)"))
+    while True:
+        # 1) prep pending jobs -> inbox
+        for job in list_upscale_jobs(cfg):
+            jf = Path(job["_file"])
+            running = jf.with_suffix(".running")
+            try:
+                os.rename(jf, running)                    # claim (atomic)
+            except OSError:
+                continue
+            try:
+                _ensure_local_source(cfg, job, progress=progress)     # pull from Nextcloud if needed
+                manifest = topaz.prep(cfg, job, progress=progress)
+                jf.with_suffix(".awaiting").write_text(json.dumps(manifest, indent=2))
+                running.unlink(missing_ok=True)
+            except Exception as e:  # noqa: BLE001
+                os.replace(running, jf.with_suffix(".failed"))
+                progress(f"[topaz] PREP FAILED {job.get('title')}: {e} "
+                         f"(parked as {jf.with_suffix('.failed').name})")
+
+        # 2) resume any parked job whose VEAI output has landed
+        for man in _awaiting_jobs(cfg):
+            af = Path(man["_file"])
+            out = topaz.find_output(cfg, man)
+            if not out:
+                continue
+            resuming = af.with_suffix(".resuming")
+            try:
+                os.rename(af, resuming)                    # claim
+            except OSError:
+                continue
+            try:
+                res = topaz.resume(cfg, man, str(out), progress=progress)
+                if res.get("rendition", {}).get("status") not in ("delivered", "exists"):
+                    raise RuntimeError("rendition was not delivered")
+                _remove(man["source"])                    # rip no longer needed (both tiers in)
+                status.log_event(cfg, "cleaned", title=man.get("title"), year=man.get("year"),
+                                 detail="rip + Topaz intermediate")
+                resuming.unlink(missing_ok=True)
+                progress(f"[topaz] done: {man.get('title')} — rendition delivered, artifacts cleaned")
+            except Exception as e:  # noqa: BLE001
+                os.replace(resuming, af.with_suffix(".failed"))
+                progress(f"[topaz] RESUME FAILED {man.get('title')}: {e} "
+                         f"(parked as {af.with_suffix('.failed').name})")
+
+        awaiting = _awaiting_jobs(cfg)
+        if once:
+            return 0
+        if awaiting:
+            progress(f"[topaz] {len(awaiting)} clip(s) awaiting your VEAI run "
+                     f"({', '.join(m.get('stem', '?') for m in awaiting[:4])}"
+                     f"{' …' if len(awaiting) > 4 else ''}) — polling {outbox}")
+        time.sleep(poll)

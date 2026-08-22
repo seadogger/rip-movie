@@ -377,13 +377,18 @@ def cmd_status(args) -> int:
     for j in jobs:
         print(f"  {j}")
 
-    from .pipeline import list_upscale_jobs, _upscale_dir
+    from .pipeline import list_upscale_jobs, _awaiting_jobs, _upscale_dir
     jobs = list_upscale_jobs(cfg)
+    awaiting = _awaiting_jobs(cfg)
     failed = len(list(_upscale_dir(cfg).glob("*.failed")))
     print(f"Upscale queue : {len(jobs)} pending" + (f", {failed} failed" if failed else "")
           + (" (run `rip-movie upscale-worker`)" if jobs else ""))
     for j in jobs[:8]:
         print(f"  - {j['title']} ({j.get('year')})")
+    if awaiting:
+        print(f"Awaiting Topaz: {len(awaiting)} clip(s) in the inbox — run them through Video Enhance AI")
+        for a in awaiting[:8]:
+            print(f"  - {a.get('stem')}")
 
     revs = list_reviews(cfg)
     print(f"Review queue  : {len(revs)} disc(s) awaiting a manual title pick"
@@ -405,17 +410,20 @@ def cmd_upscale_worker(args) -> int:
 def cmd_queue(args) -> int:
     """List pending / failed upscale jobs."""
     cfg = _load(args)
-    from .pipeline import list_upscale_jobs, _upscale_dir
+    from .pipeline import list_upscale_jobs, _awaiting_jobs, _upscale_dir
     jobs = list_upscale_jobs(cfg)
+    awaiting = _awaiting_jobs(cfg)
     failed = sorted(_upscale_dir(cfg).glob("*.failed"))
-    running = sorted(_upscale_dir(cfg).glob("*.running"))
-    if not jobs and not failed and not running:
+    running = sorted(_upscale_dir(cfg).glob("*.running")) + sorted(_upscale_dir(cfg).glob("*.resuming"))
+    if not jobs and not awaiting and not failed and not running:
         print("upscale queue empty")
         return 0
     for r in running:
         print(f"{WARN} running: {r.stem}")
     for j in jobs:
         print(f"  pending: {j['title']} ({j.get('year')})  <- {Path(j['source']).name}")
+    for a in awaiting:
+        print(f"{WARN} awaiting Topaz: {a.get('stem')}  (run it through Video Enhance AI → outbox)")
     for f in failed:
         print(f"{BAD} failed: {f.stem}  (fix + `mv {f.name} {f.stem}.json` to requeue)")
     return 0
