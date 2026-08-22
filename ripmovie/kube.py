@@ -50,6 +50,20 @@ def exec_in(namespace: str, pod: str, argv: list[str], container: Optional[str] 
     return _run(cmd, timeout=timeout)
 
 
+def exec_popen(namespace: str, pod: str, argv: list[str], container: Optional[str] = None,
+               context: Optional[str] = None):
+    """Start a pod command and return its Popen (stdout=PIPE) so the output can be streamed/piped —
+    e.g. `cat <file>` into ffmpeg's stdin to extract a few frames without pulling the whole file."""
+    cmd = ["kubectl"]
+    if context:
+        cmd += ["--context", context]
+    cmd += ["-n", namespace, "exec", pod]
+    if container:
+        cmd += ["-c", container]
+    cmd += ["--", *argv]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE)
+
+
 def exec_stdin_file(namespace: str, pod: str, argv: list[str], local_path: str,
                     container: Optional[str] = None, context: Optional[str] = None,
                     timeout: int = 7200) -> str:
