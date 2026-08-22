@@ -74,12 +74,43 @@ def container_ext(format_name: str, source_path: str) -> str:
     return (Path(source_path).suffix.lstrip(".").lower() or "mkv")
 
 
+def clear_foreign_sub_defaults(cfg: Config, mkv_path: str) -> int:
+    """Clear the 'default' flag on every subtitle track so no (possibly foreign) subtitle auto-displays.
+    Discs sometimes default to a French/Spanish sub, which the raw rip inherits (the RR/WIR bug).
+    In-place via mkvpropedit — no re-mux. Returns the number of subtitle tracks cleared."""
+    import subprocess
+    if not mkv_path.lower().endswith((".mkv", ".mka")):
+        return 0                                            # mkvpropedit is Matroska-only
+    fp = cfg.get("paths.ffmpeg", "ffmpeg").replace("ffmpeg", "ffprobe")
+    mp = cfg.get("paths.mkvpropedit", "/opt/homebrew/bin/mkvpropedit")
+    out = subprocess.run([fp, "-v", "error", "-select_streams", "s", "-show_entries", "stream=index",
+                          "-of", "csv=p=0", mkv_path], capture_output=True, text=True).stdout
+    n = len([x for x in out.split() if x.strip()])
+    if n == 0:
+        return 0
+    args = [mp, mkv_path]
+    for i in range(1, n + 1):
+        args += ["--edit", f"track:s{i}", "--set", "flag-default=0"]
+    subprocess.run(args, capture_output=True)
+    return n
+
+
+def _safe_title(title: str) -> str:
+    """Filesystem-safe title matching the library convention: ':' -> ' -' (so 'Movie: Sub' and
+    'Movie - Sub' don't split into two folders), and drop the other illegal path chars."""
+    title = title.replace(": ", " - ").replace(":", " -")
+    for c in '/\\*?"<>|':
+        title = title.replace(c, "")
+    return " ".join(title.split()).strip()
+
+
 def target(cfg: Config, local_path: str, title: str, year) -> dict:
     """Return the schema folder/filename/relative-path for a source file."""
     info = probe(cfg, local_path)
     restag = res_tag(info["height"], info["width"])
     codectag = codec_tag(info["codec"])
     ext = container_ext(info["format_name"], local_path)
+    title = _safe_title(title)
     folder = f"{title} ({year})" if year else title
     filename = f"{folder} - {restag} {codectag}.{ext}"
     sub = cfg.get("library.movies_subpath", "Videos/Movies").strip("/")

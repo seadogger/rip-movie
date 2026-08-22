@@ -303,6 +303,21 @@ def cmd_rip(args) -> int:
         print(f"{BAD} {e}")
         return 1
     print(f"{OK} ripped -> {path}")
+    # normalize: clear any foreign default subtitle the disc set (the RR/WIR auto-display bug)
+    try:
+        from .naming import clear_foreign_sub_defaults
+        n = clear_foreign_sub_defaults(cfg, path)
+        if n:
+            print(f"  normalized {n} subtitle track(s) — none set to auto-display")
+    except Exception as e:  # noqa: BLE001
+        print(f"  (subtitle normalize skipped: {e})")
+    # eject when done (the bare rip previously left the disc in)
+    if cfg.get("disc.eject_when_done", True):
+        try:
+            from .watch import eject
+            eject(cfg); print(f"  ⏏ disc ejected")
+        except Exception:
+            pass
     return 0
 
 
