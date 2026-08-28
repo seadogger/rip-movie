@@ -506,11 +506,12 @@ def run_topaz_handoff_worker(cfg: Config, once: bool = False, poll: int = 30,
                 progress(f"[topaz] PREP FAILED {job.get('title')}: {e} "
                          f"(parked as {jf.with_suffix('.failed').name})")
 
-        # 2) resume any parked job whose VEAI output has landed
+        # 2) resume any parked job whose VEAI output has landed. Chunked jobs wait for EVERY segment.
         for man in _awaiting_jobs(cfg):
             af = Path(man["_file"])
-            out = topaz.find_output(cfg, man)
-            if not out:
+            chunked = bool(man.get("segments"))
+            outs = topaz.find_outputs(cfg, man) if chunked else topaz.find_output(cfg, man)
+            if not outs:
                 continue
             resuming = af.with_suffix(".resuming")
             try:
@@ -518,7 +519,8 @@ def run_topaz_handoff_worker(cfg: Config, once: bool = False, poll: int = 30,
             except OSError:
                 continue
             try:
-                res = topaz.resume(cfg, man, str(out), progress=progress)
+                res = (topaz.resume_chunked(cfg, man, outs, progress=progress) if chunked
+                       else topaz.resume(cfg, man, str(outs), progress=progress))
                 if res.get("rendition", {}).get("status") not in ("delivered", "exists"):
                     raise RuntimeError("rendition was not delivered")
                 _remove(man["source"])                    # rip no longer needed (both tiers in)

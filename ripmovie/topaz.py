@@ -207,6 +207,16 @@ def prep(cfg: Config, job: dict, progress: Callable[[str], None] = print) -> dic
     _run([ff, "-y", *inp, "-vf", vf, "-r", g["fps"], "-fps_mode", "cfr",
           "-an", "-dn", "-map", "0:v:0", "-map_chapters", "-1", *venc, str(inter)])
     _check_duration(cfg, str(inter), expected, progress)        # cadence sanity before the handoff
+
+    # Optionally split the prepped clip into ~N-minute segments so a VEAI freeze/leak on a long render
+    # only costs one segment (and memory resets between parts). Segments stream-copy out of the intra
+    # intermediate, then the whole clip is removed — the manifest carries the ordered segment list.
+    chunk_s = _chunk_seconds(cfg)
+    segments = None
+    if chunk_s > 0 and expected > chunk_s + 5:                  # don't bother splitting a short clip
+        segments = _segment_clip(cfg, str(inter), inbox, stem, ext, chunk_s, progress)
+        Path(inter).unlink(missing_ok=True)                    # keep only the segments in the inbox
+
     status.clear(cfg, "upscaling")                              # -> lane flips to the "awaiting" state
 
     manifest = {
@@ -216,9 +226,16 @@ def prep(cfg: Config, job: dict, progress: Callable[[str], None] = print) -> dic
         "out_w": g["out_w"], "out_h": g["out_h"], "fps": g["fps"],
         "expected_duration": expected, "created": time.time(),
     }
+    if segments:
+        manifest["segments"] = segments
     _write_howto(cfg)
-    progress(f"[topaz] ready: {inter.name} is in the inbox. Run it through Video Enhance AI "
-             f"({model_note}, output 1920-wide -> outbox); the pipeline finishes it automatically.")
+    if segments:
+        progress(f"[topaz] ready: {len(segments)} segments ({stem} p01…p{len(segments):02d}) are in the "
+                 f"inbox. Run EACH through Video Enhance AI ({model_note}, output 1920-wide -> outbox), "
+                 f"one at a time; the pipeline conforms + stitches them automatically once all are done.")
+    else:
+        progress(f"[topaz] ready: {inter.name} is in the inbox. Run it through Video Enhance AI "
+                 f"({model_note}, output 1920-wide -> outbox); the pipeline finishes it automatically.")
     return manifest
 
 
@@ -252,59 +269,191 @@ def find_output(cfg: Config, manifest: dict) -> Path | None:
     return None
 
 
-def resume(cfg: Config, manifest: dict, output: str,
-           progress: Callable[[str], None] = print, dry_run: bool = False) -> dict:
-    """Finish a VEAI-upscaled clip: encode -> 1080p H.264, then mux master audio + OCR'd subs and
-    deliver. Cleans the intermediate + Topaz output alongside the normal rendition temps on success.
-    dry_run builds the final .mp4 locally but skips delivery + cleanup (used to smoke-test)."""
-    from .pipeline import _finalize_rendition, _remove
+def _chunk_seconds(cfg: Config) -> float:
+    """Segment length in seconds (0 = whole movie in one clip)."""
+    return float(cfg.get("upscale.topaz_handoff.chunk_minutes", 0) or 0) * 60.0
 
-    source = manifest["source"]
-    title, year, tmdb_id = manifest["title"], manifest.get("year"), manifest.get("tmdb_id")
-    out_w, out_h, fps = manifest["out_w"], manifest["out_h"], manifest["fps"]
 
-    work = cfg.path_for("paths.work_dir")
-    work.mkdir(parents=True, exist_ok=True)
-    stem = Path(source).stem
-    video = work / f"{stem}_up_video.mp4"          # final-geometry H.264 the mux step copies
-    final = work / f"{stem}_1080p.mp4"
-    srt = work / f"{stem}_1080p.eng.srt"
-    started = time.time()
-    progf = cfg.path_for("paths.state_dir") / "status" / "upscale_progress.json"
-    progf.parent.mkdir(parents=True, exist_ok=True)
-    _remove(progf)
-
-    status.write(cfg, "upscaling", title=title, year=year,
-                 stage="encoding Topaz output → 1080p", started=started,
-                 output=str(final), progress_file=str(progf))
+def _segment_clip(cfg: Config, src: str, out_dir: Path, stem_base: str, ext: str,
+                  chunk_s: float, progress: Callable[[str], None] = print) -> list[dict]:
+    """Stream-copy an all-intra intermediate into ~chunk_s parts named '{stem_base} pNN.{ext}'.
+    ProRes (and near-lossless H.264) cut cleanly at segment boundaries. Returns the segment list
+    [{clip, stem, expected_duration}, ...] in play order — the stem is what find_outputs matches on."""
     ff = cfg.get("paths.ffmpeg", "ffmpeg")
-    # VEAI often re-adds letterbox when its output is a 16:9 preset (1920x1080). Crop any bars it
-    # added back off, THEN conform to the target — so the result is correct whether the GUI was set
-    # to 1080p, 1920-wide, or a flat 2x. A clean (bar-less) output simply detects no crop.
+    fmt = "mov" if ext == "mov" else "mp4"
+    pat = str(out_dir / f"{stem_base} p%02d.{ext}")
+    _run([ff, "-y", "-i", str(src), "-map", "0:v:0", "-c", "copy", "-f", "segment",
+          "-segment_time", str(chunk_s), "-reset_timestamps", "1", "-segment_start_number", "1",
+          "-segment_format", fmt, pat])
+    # collect the parts WITHOUT glob — stem_base contains '[Proteus]' and '[...]' is a glob charclass
+    prefix = f"{stem_base} p"
+    parts = sorted(q for q in out_dir.iterdir()
+                   if q.suffix.lower() == f".{ext}" and q.stem.startswith(prefix)
+                   and q.stem[len(prefix):].isdigit())
+    segs = [{"clip": str(p), "stem": p.stem, "expected_duration": _duration(cfg, str(p))} for p in parts]
+    progress(f"[topaz] split into {len(segs)} segment(s) of ~{chunk_s/60:.0f} min each")
+    return segs
+
+
+def find_outputs(cfg: Config, manifest: dict) -> list[Path] | None:
+    """Chunked jobs: the COMPLETE VEAI output for every segment, in order — or None if any is still
+    missing/incomplete. Same complete-render guard as find_output, applied per segment, so resume only
+    fires once the whole movie has been run through the GUI."""
+    _, outbox = handoff_dirs(cfg)
+    settle = float(cfg.get("upscale.topaz_handoff.settle_seconds", 20))
+    now = time.time()
+    outs = [p for p in outbox.iterdir() if p.is_file() and p.suffix.lower() in _VIDEO_EXTS]
+    results: list[Path] = []
+    for seg in manifest["segments"]:
+        stem = seg["stem"]
+        exp = float(seg.get("expected_duration", 0) or 0)
+        found = None
+        for p in sorted((q for q in outs if q.name.startswith(stem)), key=lambda f: -f.stat().st_mtime):
+            stt = p.stat()
+            if stt.st_size <= 0 or (now - stt.st_mtime) < settle:      # still being written
+                continue
+            dur = _duration(cfg, str(p))
+            if dur <= 0 or (exp > 0 and dur < exp - 5):                # partial / no moov yet
+                continue
+            found = p
+            break
+        if not found:
+            return None
+        results.append(found)
+    return results
+
+
+def _capture_pairs(cfg: Config, prep_clip: str, veai_output: str, out_w: int, out_h: int,
+                   ocrop, slug: str, progress: Callable[[str], None] = print) -> None:
+    """Bank aligned (LR = prep/DVD input, HR = Proteus output) frame pairs for training a distilled
+    model that mimics Proteus. Sampled 1-in-N; LR is sized to exactly out/4 so HR = 4x LR (the
+    student's fixed scale). Best-effort: any failure is swallowed so it can't break delivery."""
+    if not bool(cfg.get("distill.capture_pairs", False)):
+        return
+    every = int(cfg.get("distill.sample_every", 15))
+    pdir = _p(cfg, "distill.pairs_dir", "~/rip-movie/distill/pairs")
+    lrd, hrd = pdir / "lr", pdir / "hr"
+    lrd.mkdir(parents=True, exist_ok=True); hrd.mkdir(parents=True, exist_ok=True)
+    ff = cfg.get("paths.ffmpeg", "ffmpeg")
+    lw, lh = round(out_w / 4), round(out_h / 4)          # LR size; HR = 4x this => exact student scale
+    hw, hh = lw * 4, lh * 4
+    sel = rf"select='not(mod(n\,{every}))'"              # same n on both inputs => aligned frames
+    pre = slug.replace(" ", "_")[:40]
+    # LR: the prep clip (VEAI's actual input domain), downsized to lw x lh
+    _run([ff, "-y", "-i", prep_clip, "-vf", f"{sel},scale={lw}:{lh}:flags=area,setsar=1",
+          "-vsync", "0", "-q:v", "2", str(lrd / f"{pre}_%05d.jpg")])
+    # HR: the Proteus output, VEAI bars cropped + conformed to hw x hh (matching sampled frames)
+    crop = f"crop={ocrop[0]}:{ocrop[1]}:{ocrop[2]}:{ocrop[3]}," if ocrop else ""
+    _run([ff, "-y", "-i", veai_output, "-vf", f"{sel},{crop}scale={hw}:{hh}:flags=lanczos,setsar=1",
+          "-vsync", "0", "-q:v", "2", str(hrd / f"{pre}_%05d.jpg")])
+    n = min(len(list(lrd.glob(f"{pre}_*.jpg"))), len(list(hrd.glob(f"{pre}_*.jpg"))))
+    progress(f"[distill] banked {n} training pairs (1-in-{every}) -> {pdir}")
+
+
+def _conform(cfg: Config, output: str, out_w: int, out_h: int, dst: Path,
+             progress: Callable[[str], None] = print, label: str = "") -> tuple | None:
+    """Crop any letterbox VEAI re-added (16:9 preset on a scope clip), scale to out_w x out_h, and
+    force EXACT constant frame rate -> a clean video-only H.264 at dst. Returns the detected crop (or
+    None) so pair-capture reuses the same geometry. The CFR stamp is what keeps A/V from drifting."""
+    ff = cfg.get("paths.ffmpeg", "ffmpeg")
     oi = _probe(cfg, str(output))
     ocrop = detect_crop(cfg, str(output), oi["width"], oi["height"])
     vf = ""
     if ocrop:
         cw, ch, cx, cy = ocrop
         vf = f"crop={cw}:{ch}:{cx}:{cy},"
-        progress(f"[topaz] {title}: VEAI re-added bars -> cropping to {cw}x{ch} then conforming")
+        progress(f"[topaz] {label}VEAI re-added bars -> cropping to {cw}x{ch} then conforming")
     vf += f"scale={out_w}:{out_h}:flags=lanczos,setsar=1,format=yuv420p"
-    # VEAI stamps a slightly-off, non-standard rate (e.g. 23.9857); force EXACT constant frame rate
-    # so the video can't drift against the audio over a full movie (the sync bug). -dn drops VEAI's
-    # stray data stream. output_fps=source keeps true film cadence (23.976); '30' bakes 60Hz-smooth.
     tgt_fps = _target_fps(cfg, oi["fps"])
-    progress(f"[topaz] {title}: encoding VEAI output ({oi['width']}x{oi['height']} @ {oi['fps']}) -> "
+    progress(f"[topaz] {label}encoding VEAI output ({oi['width']}x{oi['height']} @ {oi['fps']}) -> "
              f"{out_w}x{out_h} H.264 @ {tgt_fps} CFR ...")
     _run([ff, "-y", "-i", str(output), "-vf", vf, "-r", tgt_fps, "-fps_mode", "cfr",
           "-an", "-dn", "-map", "0:v:0", "-map_chapters", "-1",
-          "-c:v", "libx264", "-crf", "18", "-preset", "medium",
-          "-pix_fmt", "yuv420p", str(video)])
-    _check_duration(cfg, str(video), manifest["expected_duration"], progress)  # A/V-sync safety net
+          "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", str(dst)])
+    return ocrop
+
+
+def _resume_setup(cfg: Config, manifest: dict, stage: str):
+    """Shared work-path + status boilerplate for resume / resume_chunked."""
+    from .pipeline import _remove
+    source = manifest["source"]
+    work = cfg.path_for("paths.work_dir"); work.mkdir(parents=True, exist_ok=True)
+    stem = Path(source).stem
+    paths = {"video": work / f"{stem}_up_video.mp4", "final": work / f"{stem}_1080p.mp4",
+             "srt": work / f"{stem}_1080p.eng.srt", "work": work, "stem": stem}
+    started = time.time()
+    progf = cfg.path_for("paths.state_dir") / "status" / "upscale_progress.json"
+    progf.parent.mkdir(parents=True, exist_ok=True); _remove(progf)
+    status.write(cfg, "upscaling", title=manifest["title"], year=manifest.get("year"),
+                 stage=stage, started=started, output=str(paths["final"]), progress_file=str(progf))
+    return paths, started, progf
+
+
+def resume(cfg: Config, manifest: dict, output: str,
+           progress: Callable[[str], None] = print, dry_run: bool = False) -> dict:
+    """Finish a VEAI-upscaled clip: encode -> 1080p H.264, then mux master audio + OCR'd subs and
+    deliver. Cleans the intermediate + Topaz output alongside the normal rendition temps on success.
+    dry_run builds the final .mp4 locally but skips delivery + cleanup (used to smoke-test)."""
+    from .pipeline import _finalize_rendition
+    source = manifest["source"]
+    title, year, tmdb_id = manifest["title"], manifest.get("year"), manifest.get("tmdb_id")
+    out_w, out_h = manifest["out_w"], manifest["out_h"]
+    p, started, progf = _resume_setup(cfg, manifest, "encoding Topaz output → 1080p")
+
+    ocrop = _conform(cfg, str(output), out_w, out_h, p["video"], progress, label=f"{title}: ")
+    _check_duration(cfg, str(p["video"]), manifest["expected_duration"], progress)  # A/V-sync safety net
+
+    try:                                                 # tap: bank DVD->Proteus pairs for distillation
+        _capture_pairs(cfg, manifest["intermediate"], output, out_w, out_h, ocrop, p["stem"], progress)
+    except Exception as e:                               # never let capture break delivery
+        progress(f"[distill] pair capture skipped: {e}")
 
     return _finalize_rendition(
-        cfg, source, str(video), str(final), str(srt), title, year, tmdb_id,
+        cfg, source, str(p["video"]), str(p["final"]), str(p["srt"]), title, year, tmdb_id,
         started=started, progf=progf, dry_run=dry_run, keep=False,
         extra_cleanup=(manifest["intermediate"], output), progress=progress)
+
+
+def resume_chunked(cfg: Config, manifest: dict, outputs: list,
+                   progress: Callable[[str], None] = print, dry_run: bool = False) -> dict:
+    """Finish a CHUNKED job: conform each segment's VEAI output to the target geometry/CFR, concat the
+    parts in order into one video (stream-copy — identical codec/params), then mux the master audio +
+    OCR'd subs and deliver. Cleans every segment clip, Topaz output, and part on success."""
+    from .pipeline import _finalize_rendition
+    source = manifest["source"]
+    title, year, tmdb_id = manifest["title"], manifest.get("year"), manifest.get("tmdb_id")
+    out_w, out_h = manifest["out_w"], manifest["out_h"]
+    segments = manifest["segments"]
+    p, started, progf = _resume_setup(cfg, manifest, f"encoding {len(segments)} Topaz segments → 1080p")
+    ff = cfg.get("paths.ffmpeg", "ffmpeg")
+
+    parts: list[Path] = []
+    for i, (seg, out) in enumerate(zip(segments, outputs)):
+        part = p["work"] / f"{p['stem']}_up_p{i:02d}.mp4"
+        ocrop = _conform(cfg, str(out), out_w, out_h, part, progress,
+                         label=f"{title} p{i + 1:02d}/{len(segments)}: ")
+        parts.append(part)
+        try:                                             # bank this segment's DVD->Proteus pairs
+            _capture_pairs(cfg, seg["clip"], str(out), out_w, out_h, ocrop, f"{p['stem']}_p{i:02d}", progress)
+        except Exception as e:
+            progress(f"[distill] pair capture skipped (p{i:02d}): {e}")
+
+    # concat the conformed parts — same encoder settings on every part, so a demuxer stream-copy is
+    # lossless and instant. (Escape ' for the concat list per ffmpeg's rules.)
+    listf = p["work"] / f"{p['stem']}_concat.txt"
+    listf.write_text("".join(f"file '{str(pp).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n"
+                             for pp in parts))
+    progress(f"[topaz] {title}: concatenating {len(parts)} conformed segments -> one rendition")
+    _run([ff, "-y", "-f", "concat", "-safe", "0", "-i", str(listf), "-c", "copy",
+          "-map", "0:v:0", str(p["video"])])
+    _check_duration(cfg, str(p["video"]), manifest["expected_duration"], progress)  # A/V-sync safety net
+
+    extra = (tuple(s["clip"] for s in segments) + tuple(str(o) for o in outputs)
+             + tuple(str(pp) for pp in parts) + (str(listf),))
+    return _finalize_rendition(
+        cfg, source, str(p["video"]), str(p["final"]), str(p["srt"]), title, year, tmdb_id,
+        started=started, progf=progf, dry_run=dry_run, keep=False,
+        extra_cleanup=extra, progress=progress)
 
 
 # ---- one-time inbox how-to ----------------------------------------------------------------------
@@ -327,6 +476,11 @@ def _write_howto(cfg: Config) -> None:
         "  Both use the PROTEUS model — the ONLY difference is Grain: ON for live action, OFF for\n"
         "  animation (cel/CGI is inherently clean, so grain looks wrong on it). Save two Proteus\n"
         "  presets in VEAI (grained / no-grain) so each batch is just drag + Start.\n\n"
+        "SEGMENTED movies: a long film may be split into parts named '… p01', '… p02', … — these are\n"
+        "  ONE movie. Run them all (batching is fine; VEAI does them back-to-back and saves each as it\n"
+        "  finishes). If a run freezes partway, the parts that already landed in the output folder are\n"
+        "  safe — just re-drag the REMAINING parts and Start again. The pipeline waits until every part\n"
+        "  is done, then stitches them back into a single rendition.\n\n"
         "One-time setup per model (save each as a preset so future batches are just drag + Start):\n"
         "  • OUTPUT SIZE      : 1080p — set the output to 1920 wide (let Topaz do the FULL upscale).\n"
         "                       These clips are already de-barred + de-anamorphed, so 1920 wide lands\n"

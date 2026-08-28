@@ -117,6 +117,11 @@ inbox          = "~/rip-movie/topaz/inbox"    # prepped clips land here — drag
 outbox         = "~/rip-movie/topaz/outbox"   # set VEAI's output folder to this; finished clips are picked up
 settle_seconds = 20                           # treat an outbox file as done once its size is stable this long
 intermediate   = "prores"                     # prores (best; larger) | h264 (smaller). Video-only, fed to VEAI
+chunk_minutes  = 20                           # 0 = one clip for the whole movie. >0 = split the prep into
+                                              # ~N-minute segments (p01, p02, …) so a VEAI freeze/leak on a
+                                              # long render costs only one segment, not the whole film, and
+                                              # memory resets between parts. Run each part through VEAI; the
+                                              # pipeline conforms + concatenates them back into one rendition.
 output_fps     = "source"                      # rendition cadence: source = the film's true rate snapped
                                                # clean (23.976 stays 23.976); "30" bakes 29.97 for smoother
                                                # 24p-on-60Hz playback if your Apple TV isn't set to
@@ -128,6 +133,13 @@ output_fps     = "source"                      # rendition cadence: source = the
 # (cel/CGI is inherently clean, grain looks wrong). Save two Proteus presets in VEAI accordingly.
 model_live_action = "Proteus"
 model_animation   = "Proteus no-grain"
+
+# Distillation data capture: when a Topaz rendition is finalized, also bank aligned
+# (LR = DVD/prep input, HR = Proteus output) frame pairs for training a distilled model.
+[distill]
+capture_pairs = true                # tap the handoff: save training pairs on every resume
+pairs_dir     = "~/rip-movie/distill/pairs"   # lr/ and hr/ subfolders of aligned frames
+sample_every  = 15                  # keep 1 of every N frames (diversity without banking all ~217k)
 
 [upscale.bluray_1080p]
 enabled = false                     # 1080p stays 1080p
