@@ -1,0 +1,13 @@
+# torchenv — the ML/upscale Python environment (Python 3.11).
+# Recreate on a new machine:
+#   python3.11 -m venv tools/torchenv
+#   tools/torchenv/bin/python -m ensurepip
+#   tools/torchenv/bin/pip install -r tools/requirements-torchenv.txt
+# (Apple Silicon: torch/torchvision ship MPS support in the default wheels.)
+torch==2.13.0
+torchvision==0.28.0
+coremltools==9.0
+spandrel==0.4.2
+numpy==2.4.6
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
