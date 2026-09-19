@@ -54,6 +54,96 @@ Ripping is disc-bound (~20 min); the AI upscale runs through **Topaz Video Enhan
 Because the Pi 5 cluster can't transcode, every watchable file must direct-play on Apple devices.
 That single constraint drives every encoding decision below.
 
+## Architecture (C4 model)
+
+Three zoom levels — the system in its world, the runtime pieces, then the code inside the pipeline.
+
+### Level 1 — System context
+
+Who and what `rip-movie` talks to. The user does two physical things (load discs, run one Topaz
+batch); everything else is automated.
+
+```mermaid
+flowchart TB
+  user([👤 User<br/>loads discs · runs 1 VEAI batch]):::person
+  subgraph sys[rip-movie · the system]
+    rm[["disc → library pipeline<br/>+ dashboard + daemons"]]
+  end
+  drive([💿 Optical drive<br/>MakeMKV / libdvdcss]):::ext
+  tmdb([🎬 TMDb<br/>title · runtime · id]):::ext
+  tvdb([📺 TheTVDB<br/>episode numbers]):::ext
+  store([🗄️ Media store<br/>Nextcloud / mount / local]):::ext
+  player([▶️ Player<br/>Jellyfin / Plex]):::ext
+  veai([✨ Topaz VEAI 2.6.4<br/>GUI upscaler]):::ext
+  s3([☁️ Backup · S3<br/>optional]):::ext
+
+  user --> rm
+  drive --> rm
+  rm <--> tmdb
+  rm <--> tvdb
+  rm --> store --> player
+  rm -. "prep clip / resume render" .-> veai
+  rm -. optional .-> s3
+  classDef person fill:#1f6feb,color:#fff,stroke:#0b4;
+  classDef ext fill:#eee,color:#333,stroke:#999;
+```
+
+### Level 2 — Containers
+
+The runtime pieces and how they exchange work. The **queue decouples** the fast rip from the slow,
+semi-manual upscale.
+
+```mermaid
+flowchart TB
+  cli["CLI · ./bin/rip-movie<br/>(argparse entrypoint)"]
+  subgraph pkg[ripmovie/ · orchestration package · stdlib only]
+    pipe["pipeline.py<br/>process_disc · deliver · upscale queue"]
+    engines["rip · identify · naming · finalize<br/>enhance · topaz"]
+  end
+  watch["watch daemon<br/>disc-in → rip → deliver → eject"]
+  worker["upscale-worker daemon<br/>drains queue · prep→resume"]
+  dash["dashboard · stdlib http.server<br/>swimlanes · /library · /config · :8422"]
+  state[("state_dir/<br/>status · upscale_queue · review")]
+  helpers["helpers · ~/rip-movie/work/.helpers/<br/>rip_batch · chunked_upload · ddrescue"]
+  tools["external tools<br/>makemkvcon · ffmpeg · tesseract<br/>dvdbackup/libdvdcss · ddrescue · VEAI"]
+  store([media store]):::ext
+  player([player]):::ext
+
+  cli --> pkg
+  watch --> pipe
+  worker --> pipe
+  pipe --> engines --> tools
+  pipe --> state
+  worker --> state
+  dash --> state
+  dash --> pipe
+  pipe --> store --> player
+  helpers --> tools
+  helpers --> store
+  classDef ext fill:#eee,color:#333,stroke:#999;
+```
+
+### Level 3 — Components (inside the pipeline)
+
+The modules in `ripmovie/` and their responsibilities (full table in **[AGENTS.md](./AGENTS.md)**).
+
+```mermaid
+flowchart LR
+  disc["disc.py<br/>scan · title-select"] --> pipeline
+  identify["identify.py<br/>TMDb match"] --> pipeline
+  naming["naming.py<br/>schema names"] --> pipeline
+  rip["rip.py<br/>MakeMKV rip"] --> pipeline
+  pipeline{{"pipeline.py<br/>orchestration"}}
+  pipeline --> enhance["enhance.py<br/>cadence · crop · duration"]
+  pipeline --> topaz["topaz.py<br/>VEAI handoff"]
+  pipeline --> finalize["finalize.py<br/>mux + subs OCR"]
+  pipeline --> deliver["deliver.py<br/>store copy"]
+  pipeline --> jellyfin["jellyfin.py<br/>refresh · identify"]
+  pipeline --> status["status.py<br/>dashboard JSON"]
+  library["library.py<br/>tree · upscale-candidates"] --> dashboard["dashboard.py"]
+  config["config.py<br/>TOML + env expansion"] --- pipeline
+```
+
 ## Two-tier output: lossless master + Apple rendition
 
 Every movie gets **two files in the same folder**, matching the library's existing pattern:
@@ -146,6 +236,39 @@ first:
 DVD volume labels are often unusable (`ARMAGEDN`, `COURAGEUNDERFIREDTSVER3`). When auto-identify
 can't recover one, pass `--name "Armageddon" --year 1998` and the runtime match handles the rest.
 
+## Skills (Claude Code)
+
+The repo ships **agent skills** under `.claude/skills/` — runbooks an agent (or a human) follows to
+drive the pipeline. Invoke with `/<name>`.
+
+| Skill | Scope | What it does |
+|---|---|---|
+| **`/rip`** | Orchestrator (movies + TV, many discs) | Establishes the **goal** (player, store, optional S3 backup), has the user place credentials in `config/secrets.env`/Keychain **without the agent reading them**, builds the delivery plan, runs `config-check`, then loops each disc: identify → confirm → rip → deliver → verify → refresh → clean. Handles **CSS-protected discs** (`dvdbackup`+libdvdcss decrypt-mirror), **scratched discs** (`ddrescue` forward+reverse), **drive brown-outs** (power-cycle guidance), and **TV episode identification by on-screen title card → TheTVDB**. |
+| **`/rip-disc`** | Focused (one confirmed disc → Jellyfin) | The narrow flow: preflight → identify → **title-confirmation gate** → rip → `push` to the store → Jellyfin refresh → verify, with the live dashboard up. No goal/store setup — assumes the repo's default Nextcloud+Jellyfin target. |
+
+Capabilities the `/rip` skill encodes (learned the hard way, so they don't get re-discovered):
+
+- **Title-card episode ID** — off-air/compilation discs are in arbitrary order; identify each title
+  from a `ffmpeg` contact-sheet of its title card and map to **TheTVDB** `S##E##` (segment-level for
+  Animaniacs/Care Bears; dual-episode files as `S01E16-E17`; skip play-alls and cross-promo trailers).
+- **Chunked WebDAV** delivery for large files / flaky sync clients (10 MB `dd`-streamed chunks).
+- **`dvdbackup` + libdvdcss** decrypt-mirror when MakeMKV's LibreDrive won't engage on a CSS disc,
+  then a lossless rip from the local copy.
+- **`ddrescue`** forward+reverse imaging (with resumable mapfile) for scratched discs.
+- **Secrets discipline** — the agent never reads keys; they live in gitignored `secrets.env` / the
+  Keychain and are consumed only via `${ENV}` expansion at runtime.
+
+## Services, daemons & dashboards
+
+| Service | Command | Role |
+|---|---|---|
+| **Dashboard** | `rip-movie dashboard` | stdlib `http.server` at **`:8422`** — pipeline swimlanes (Rip→Master→Store→Upscale→Cleanup→In Player), the **📼 `/library`** upgrade-DVDs viewer, the **⚙ `/config`** comment-preserving TOML editor + health check, library search, and a recent-pushes feed. Loads code at start — **restart to pick up changes**. |
+| **Disc watcher** | `rip-movie watch` | Daemon: waits for a disc, rips it, delivers the master, queues the upscale, ejects — then waits for the next. |
+| **Upscale worker** | `rip-movie upscale-worker` | Daemon: drains the upscale queue serially (Topaz handoff *or* Real-ESRGAN), pulling masters back from the store for existing-library re-upscales. |
+| **Status files** | (`status.py`) | Tiny JSON under `state_dir/status/` the dashboard polls — the glue between daemons and the live view. |
+
+Daemons **don't hot-reload** — restart `watch`/`upscale-worker`/`dashboard` after editing their code.
+
 ## Commands
 
 ```bash
@@ -171,12 +294,25 @@ when its render lands in the outbox — so your only manual step is one VEAI bat
 
 ## Delivery & cleanup
 
-Files stream into the Nextcloud pod over `kubectl` to a `.part` and atomically rename (a partial
-transfer never gets indexed), get `chown`'d to the web user, then `occ files:scan` registers just
-that folder and Jellyfin is refreshed + force-identified to the right TMDb id. A **duration
-safety-net** refuses to deliver any rendition whose length doesn't match its source (so a partial or
-aborted upscale can never land in the library). Local temporaries are removed **only after** delivery
-is confirmed — so a failed run can always be retried.
+Delivery drops the finished file into the media store and refreshes the player — **no `kubectl`, no
+`occ` in the write path**. Two transports, picked by what the store needs:
+
+- **File Provider mount copy** (the package default, `deliver.local`) — copy into the Nextcloud
+  virtual-files mount to a `.part`, then `os.replace` (atomic; a partial never gets indexed). The
+  sync client uploads it on demand; credentials stay in the Keychain, nothing in the pipeline.
+- **Chunked WebDAV** (the interactive/large-file path, `~/rip-movie/work/.helpers/chunked_upload.sh`)
+  — MKCOL an upload session, PUT 10 MB chunks streamed with `dd` (no full-file copy, no split-suffix
+  cap), MOVE-assemble with `OC-Total-Length`. This is what survives multi-GB files and a flaky sync
+  client. Pre-create Show/Season folders or the assemble-MOVE 409s.
+
+Then Jellyfin is refreshed over **direct HTTP** (`Authorization: MediaBrowser Token="…"`) and
+force-identified to the right TMDb id. A **duration safety-net** refuses any rendition whose length
+drifts >2.5 s from its source (a partial/aborted upscale can never land). Every delivery is
+**byte-verified** (destination size == local size) and local temporaries are removed **only after**
+that check — so a failed run always keeps its files for retry.
+
+> `kubectl` remains only on the **library-read** paths (the `/library` viewer and `search`), never on
+> the delivery path.
 
 ## Configuration
 

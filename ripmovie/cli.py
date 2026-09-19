@@ -49,28 +49,33 @@ def cmd_config_check(args) -> int:
         print(f"  {OK if found else BAD} {name}: {found or 'NOT FOUND'}")
         rc |= 0 if found else 1
 
+    # MakeMKV license (binary present != key still valid — the beta key lapses ~monthly)
+    from .disc import check_license
+    lic_ok, lic_detail = check_license(cfg)
+    print(f"  {OK if lic_ok else BAD} MakeMKV license: {lic_detail}")
+    rc |= 0 if lic_ok else 1
+
     # TMDb key
     tmdb = cfg.get("identify.tmdb_api_key", "")
     print(f"  {OK if tmdb else WARN} TMDb api key: {'set' if tmdb else 'MISSING (identify will fail)'}")
 
-    # Cluster
-    from . import kube
-    ctx = cfg.get("deliver.kubectl.context")
-    if kube.reachable(ctx):
-        print(f"  {OK} cluster reachable (context={ctx})")
-        for ns_key, sel_key, label in [
-            ("deliver.kubectl.nextcloud_namespace", "deliver.kubectl.nextcloud_pod_selector", "nextcloud pod"),
-            ("jellyfin.namespace", "jellyfin.pod_selector", "jellyfin pod"),
-        ]:
-            try:
-                pod = kube.pod_name(cfg.get(ns_key), cfg.get(sel_key), context=ctx)
-                print(f"  {OK} {label}: {pod}")
-            except kube.KubeError as e:
-                print(f"  {BAD} {label}: {e}")
-                rc |= 1
-    else:
-        print(f"  {BAD} cluster not reachable (context={ctx})")
-        rc |= 1
+    # Delivery target — a plain copy into the mounted Nextcloud File Provider folder (no auth, no
+    # kubectl). Verify the folder is mounted/writable AND that it is the same storage Jellyfin reads.
+    from .deliver import check_local, check_same_location
+    lok, ldetail = check_local(cfg)
+    print(f"  {OK if lok else BAD} delivery folder: {ldetail}")
+    rc |= 0 if lok else 1
+    if lok:
+        sok, sdetail = check_same_location(cfg)
+        print(f"  {OK if sok else BAD} same location (Mac == Jellyfin): {sdetail}")
+        rc |= 0 if sok else 1
+
+    # Jellyfin API — direct HTTP to jellyfin.base_url (no kubectl); the refresh trigger uses this same
+    # path, so a stale api_key / unreachable server is caught here, before a rip.
+    from . import jellyfin
+    api_ok, api_detail = jellyfin.health(cfg)
+    print(f"  {OK if api_ok else BAD} jellyfin api: {api_detail}")
+    rc |= 0 if api_ok else 1
 
     print("OK" if rc == 0 else "issues found")
     return rc
@@ -158,9 +163,8 @@ def cmd_search(args) -> int:
 def cmd_push(args) -> int:
     cfg = _load(args)
     from .naming import target, NamingError
-    from .deliver import push
+    from .deliver import push, dest_exists
     from .identify import search_tmdb
-    from .library import list_movie_tree
 
     local = args.file
     if not Path(local).is_file():
@@ -188,8 +192,7 @@ def cmd_push(args) -> int:
     print(f"probed : {i['width']}x{i['height']} {i['codec']} ({i['format_name']})")
     print(f"dest   : Movies/{t['folder']}/{t['filename']}")
 
-    tree = list_movie_tree(cfg)
-    if t["filename"] in [f.name for f in tree.get(t["folder"], [])]:
+    if dest_exists(cfg, t["rel"]):
         print(f"{WARN} identical name already in library — skipping (nothing to do).")
         return 0
 
@@ -201,9 +204,6 @@ def cmd_push(args) -> int:
             print(f"   - {s}")
         return 0
     print(f"{OK} delivered -> {res['dest']}")
-    if "scan" in res:
-        tail = " ".join(res["scan"].split())[-160:]
-        print(f"    occ scan: {tail}")
     print(f"    jellyfin: {res.get('jellyfin', '(skipped)')}")
     return 0
 

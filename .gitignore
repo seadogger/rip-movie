@@ -1,6 +1,9 @@
 # Secrets (real API keys / passwords) — config uses ${ENV} placeholders instead
 config/secrets.env
 
+# Claude Code: commit shared skills, keep local per-machine settings out
+.claude/settings.local.json
+
 # Runtime dirs
 work/
 logs/

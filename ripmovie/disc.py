@@ -156,6 +156,46 @@ def scan_disc(cfg: Config, device: Optional[str] = None, timeout: int = 600) -> 
     return scan
 
 
+def check_license(cfg: Config, timeout: int = 40) -> tuple[bool, str]:
+    """Probe MakeMKV's registration WITHOUT needing a disc.
+
+    `makemkvcon info` on a bogus drive index still initializes libmakemkv and prints the startup
+    banner (MSG:1005 with the version) plus any registration/expiry message. A registered install
+    emits no license warning; an expired beta key or unregistered install prints one (the beta key
+    lapses roughly monthly, and Blu-ray decryption is blocked the moment it does). We flag on the
+    license keywords only, ignoring the disc-absence messages (no usable drive / failed to open)
+    that this driveless probe always produces.
+    """
+    makemkv = cfg.get("paths.makemkvcon", "makemkvcon")
+    cmd = [makemkv, "-r", "--cache=1", "info", "disc:999"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return False, f"makemkvcon not found at {makemkv!r}"
+    except subprocess.TimeoutExpired:
+        return False, f"makemkvcon license probe timed out after {timeout}s"
+
+    version = ""
+    bad = ""
+    keywords = ("registration", "expired", "evaluation", "shareware",
+                "beta key", "too old", "not registered", "purchase", "trial")
+    for line in proc.stdout.splitlines():
+        tag, fields = _split_robot_line(line)
+        if tag != "MSG" or len(fields) < 4:
+            continue
+        code, msg = fields[0], fields[3]
+        if code == "1005":                       # "MakeMKV vX.Y.Z <platform> started"
+            version = msg.split(" started")[0].replace("MakeMKV ", "").strip() or msg
+        low = msg.lower()
+        if not bad and any(k in low for k in keywords):
+            bad = msg
+    if bad:
+        return False, bad
+    if not version:                               # banner never printed — treat as unusable
+        return False, "no MakeMKV banner (binary present but not running)"
+    return True, f"registered ({version})"
+
+
 def _first_error(out: str) -> str:
     for line in out.splitlines():
         if line.startswith("MSG:"):

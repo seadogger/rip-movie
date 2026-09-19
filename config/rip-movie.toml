@@ -149,12 +149,23 @@ enabled = false                     # 4k stays 4k
 
 # ---- Delivery (services are ClusterIP-only; we go through kubectl) -----------
 [deliver]
-method = "kubectl"                  # kubectl | webdav
+# Delivery is a plain file copy into the Nextcloud File Provider mount (see [deliver.local]).
+# No auth lives in the pipeline (the desktop client owns it) and nothing here touches kubectl.
 keep_source_master = true           # RIP ONCE: also deliver the raw lossless disc rip (all tracks,
                                     # every language, untouched) as the archival master — re-upscale
                                     # from it as models improve; the physical disc is never needed again
 
-[deliver.kubectl]
+[deliver.local]                     # the delivery target
+# dest_root = the mounted library folder as it appears in Finder on THIS Mac — the Nextcloud File
+# Provider (virtual files) mount, which is the SAME storage Jellyfin reads from (config-check verifies
+# that via `same location`). The rel path Videos/Movies/… appends to it. NOT ~/Nextcloud — that's a
+# different account. Enable virtual files in the client (isVfsEnabled) so the mount is on-demand.
+dest_root      = "~/Library/CloudStorage/Nextcloud-nextcloud.seadogger-homelab-HomeMedia"
+movies_subpath = "Videos/Movies"    # where the same-location cross-check looks for existing folders
+
+[deliver.kubectl]                   # NOT used for delivery anymore — kept only for the library
+                                    # browsing/read paths (search, dashboard /library, config test)
+                                    # in library.py/dashboard.py that still list the pod's file tree.
 context               = "default"
 nextcloud_namespace   = "nextcloud"
 nextcloud_pod_selector = "app.kubernetes.io/name=nextcloud"
@@ -163,13 +174,11 @@ data_path             = "/var/www/html/data/HomeMedia/files"  # HomeMedia user's
 web_user              = "www-data"
 occ                   = "php /var/www/html/occ"
 
-[deliver.webdav]                    # only used if method = "webdav"
-base_url  = ""                      # e.g. https://cloud.example.com/remote.php/dav/files/HomeMedia
-user      = "HomeMedia"
-password  = "${NEXTCLOUD_PASS}"
-
 [jellyfin]
-method           = "kubectl"        # kubectl exec curl to localhost inside the pod
+# All Jellyfin API calls (health, post-copy refresh, force-identify) go direct over HTTP to base_url —
+# no kubectl. base_url is REQUIRED. namespace/pod_selector below are only read by the /config test page.
+base_url         = "https://jellyfin.seadogger-homelab"
+verify_tls       = false           # homelab private-CA cert Python's bundle can't verify (curl trusts it via Keychain)
 namespace        = "jellyfin"
 pod_selector     = "app.kubernetes.io/name=jellyfin"
 service_cluster_ip = "10.43.223.16"

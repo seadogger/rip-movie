@@ -38,9 +38,9 @@ It runs on a Mac (Apple silicon) and delivers to a Nextcloud/Jellyfin homelab on
 | `finalize.py` | `mux_rendition` (Apple-native audio), `make_subtitle_sidecar` (text extract or VobSub OCR). |
 | `topaz.py` | **Topaz VEAI 2.6.4 handoff engine:** `prep` → `find_output` → `resume`, plus `_geometry`, `_true_fps`, `_snap_fps`, `_target_fps`, `_model_note`, the inbox how-to. |
 | `pipeline.py` | Orchestration: `deliver_master`, `deliver_rendition`/`_finalize_rendition`, `process_disc`, the upscale queue, `run_upscale_worker` (dispatches by engine) / `run_topaz_handoff_worker`, `enqueue_existing`, `_ensure_local_source`. |
-| `deliver.py` | `push` — stream to the Nextcloud pod (`.part` → atomic rename), chown, `occ files:scan`, Jellyfin refresh. |
-| `kube.py` | Thin `kubectl` wrappers: `pod_name`, `exec_in`, `exec_stdin_file` (local→pod), `exec_stdout_file` (pod→local). |
-| `jellyfin.py` | Jellyfin API over `kubectl exec curl`: `refresh`, `find_item`, `force_identify`. |
+| `deliver.py` | `push` — deliver a finished file by **copying it into the Nextcloud File Provider mount** (`deliver.local.dest_root`), then Jellyfin refresh. No auth, no WebDAV, no kubectl. Helpers: `dest_exists` (mount dup-check), `check_local`, `check_same_location` (Mac==Jellyfin). |
+| `kube.py` | Thin `kubectl` wrappers: `pod_name`, `exec_in`, `exec_stdin_file`, `exec_stdout_file`. **Not in the delivery path** — used only by the library-read paths (`library.py` tree listing, `dashboard.py` `/library`, `config_edit` test, `pipeline._ensure_local_source` for upscale). |
+| `jellyfin.py` | Jellyfin API over **direct HTTP** to `jellyfin.base_url` (no kubectl): `refresh`, `health`, `list_movie_paths`, `find_item`, `force_identify`. |
 | `dashboard.py` | stdlib HTTP server: pipeline swimlanes (`gather`/`_build_lanes`), the `/library` upgrade-DVDs viewer (`library_view`), `/config` editor, search. |
 | `status.py` | Tiny JSON status files under `state_dir/status/` the dashboard polls. |
 | `config_edit.py` | Comment-preserving TOML read/edit for the config page. |
