@@ -236,17 +236,17 @@ first:
 DVD volume labels are often unusable (`ARMAGEDN`, `COURAGEUNDERFIREDTSVER3`). When auto-identify
 can't recover one, pass `--name "Armageddon" --year 1998` and the runtime match handles the rest.
 
-## Skills (Claude Code)
+## Agent-assisted operation
 
-The repo ships **agent skills** under `.claude/skills/` — runbooks an agent (or a human) follows to
-drive the pipeline. Invoke with `/<name>`.
+This checkout is independently usable through `./bin/rip-movie` and the commands
+below. Coding agents read [AGENTS.md](AGENTS.md); Claude Code imports that same
+guidance through `CLAUDE.md`. No project skill installation is required.
 
-| Skill | Scope | What it does |
-|---|---|---|
-| **`/rip`** | Orchestrator (movies + TV, many discs) | Establishes the **goal** (player, store, optional S3 backup), has the user place credentials in `config/secrets.env`/Keychain **without the agent reading them**, builds the delivery plan, runs `config-check`, then loops each disc: identify → confirm → rip → deliver → verify → refresh → clean. Handles **CSS-protected discs** (`dvdbackup`+libdvdcss decrypt-mirror), **scratched discs** (`ddrescue` forward+reverse), **drive brown-outs** (power-cycle guidance), and **TV episode identification by on-screen title card → TheTVDB**. |
-| **`/rip-disc`** | Focused (one confirmed disc → Jellyfin) | The narrow flow: preflight → identify → **title-confirmation gate** → rip → `push` to the store → Jellyfin refresh → verify, with the live dashboard up. No goal/store setup — assumes the repo's default Nextcloud+Jellyfin target. |
+For a confirmed single disc, run `config-check`, inspect `identify`, confirm the
+movie/title selection, then use the documented `rip` and `push` commands. Use the
+dashboard to monitor progress and verify the destination before cleanup.
 
-Capabilities the `/rip` skill encodes (learned the hard way, so they don't get re-discovered):
+Operational notes for manual workflows and optional external helpers:
 
 - **Title-card episode ID** — off-air/compilation discs are in arbitrary order; identify each title
   from a `ffmpeg` contact-sheet of its title card and map to **TheTVDB** `S##E##` (segment-level for
